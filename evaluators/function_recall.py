@@ -1,9 +1,10 @@
 """函数准召率评估器 — AST 初筛 + LLM 终判。
 
 评估逻辑：
+- 从 write/edit 工具的 arguments 中提取 agent 实际写出的代码
+- AST 解析函数定义和调用，与 reference 比对
 - 所有 API 都出现 → KEEP
 - 有缺失 → KEEP（观察记录，不自动修改代码）
-  - 因为无法自动生成缺失函数的实现代码
 
 debug_info 中提供完整的中间数据供人工验证。
 """
@@ -11,6 +12,7 @@ debug_info 中提供完整的中间数据供人工验证。
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import re
 from typing import Any
@@ -45,10 +47,15 @@ class FunctionRecallEvaluator(BaseEvaluator):
             logger.info(f"[{self.name}] 无目标 assistant message，跳过")
             return []
 
-        # 提取 trace 中的 API
+        # 从 write/edit 工具调用中提取 trace 中实际写出的代码
         trace_code_blocks: list[str] = []
         for mi in target_indices:
-            trace_code_blocks.extend(self._extract_code_blocks(messages[mi]))
+            msg = messages[mi]
+            for tc in msg.get("tool_calls", []):
+                fn = tc.get("function", {})
+                code = self._extract_from_write_args(fn.get("arguments", ""), fn.get("name", ""))
+                if code:
+                    trace_code_blocks.append(code)
 
         trace_apis: set[str] = set()
         for code in trace_code_blocks:
@@ -207,42 +214,34 @@ AST 分析发现以下函数/API 在 agent 代码中未出现:
 
     # ── 工具方法 ──────────────────────────────────────────────────────────
 
+    _WRITE_TOOLS = {"write", "edit", "create", "create_file", "write_file"}
+    _WRITE_CONTENT_KEYS = ["content", "file_text", "text", "code"]
+
     @staticmethod
     def _get_target_indices(messages: list[dict], is_main: bool) -> list[int]:
-        if is_main:
-            return [
-                mi for mi, msg in enumerate(messages)
-                if msg.get("role") == "assistant" and FunctionRecallEvaluator._has_code_block(msg)
-            ]
-        return [mi for mi, msg in enumerate(messages) if msg.get("role") == "assistant"]
+        """找出包含 write/edit 工具调用的 assistant 消息。"""
+        indices = []
+        for mi, msg in enumerate(messages):
+            if msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls", []):
+                fn = tc.get("function", {})
+                if fn.get("name", "") in FunctionRecallEvaluator._WRITE_TOOLS:
+                    indices.append(mi)
+                    break
+        return indices
 
     @staticmethod
-    def _has_code_block(msg: dict[str, Any]) -> bool:
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            return "```" in content
-        if isinstance(content, list):
-            return any(
-                item.get("type") == "code" or "```" in (item.get("text", "") or "")
-                for item in content if isinstance(item, dict)
-            )
-        return False
-
-    @staticmethod
-    def _extract_code_blocks(msg: dict[str, Any]) -> list[str]:
-        blocks: list[str] = []
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            for m in re.finditer(r"```(?:\w*\n)?(.*?)```", content, re.DOTALL):
-                blocks.append(m.group(1).strip())
-            if not blocks and content.strip():
-                blocks.append(content.strip())
-        elif isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict):
-                    if item.get("type") == "code":
-                        blocks.append(item.get("text", "") or item.get("content", ""))
-                    elif item.get("type") == "text":
-                        for m in re.finditer(r"```(?:\w*\n)?(.*?)```", item.get("text", ""), re.DOTALL):
-                            blocks.append(m.group(1).strip())
-        return blocks
+    def _extract_from_write_args(arguments: str, tool_name: str) -> str:
+        """从 write/edit 工具的 arguments 中提取文件内容。"""
+        try:
+            args = json.loads(arguments) if isinstance(arguments, str) else arguments
+        except (json.JSONDecodeError, TypeError):
+            return ""
+        if not isinstance(args, dict):
+            return ""
+        for key in FunctionRecallEvaluator._WRITE_CONTENT_KEYS:
+            val = args.get(key)
+            if isinstance(val, str) and val.strip():
+                return val
+        return ""

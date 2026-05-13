@@ -1,6 +1,8 @@
 """参数准召率评估器 — AST 初筛 + LLM 终判。
 
 评估逻辑：
+- 从 write/edit 工具的 arguments 中提取 agent 实际写出的代码
+- AST 解析函数签名参数，与 reference 比对
 - 参数匹配 → KEEP
 - 参数不匹配 → KEEP（观察记录，无法自动生成正确参数名）
 """
@@ -8,6 +10,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import re
 from typing import Any
@@ -43,10 +46,17 @@ class ParamRecallEvaluator(BaseEvaluator):
         if not target_indices:
             return []
 
-        trace_code = "\n".join(
-            code for mi in target_indices
-            for code in self._extract_code_blocks(messages[mi])
-        )
+        # 从 write/edit 工具调用中提取 trace 中实际写出的代码
+        trace_code_blocks: list[str] = []
+        for mi in target_indices:
+            msg = messages[mi]
+            for tc in msg.get("tool_calls", []):
+                fn = tc.get("function", {})
+                code = self._extract_from_write_args(fn.get("arguments", ""), fn.get("name", ""))
+                if code:
+                    trace_code_blocks.append(code)
+
+        trace_code = "\n".join(trace_code_blocks)
         trace_sigs = self._extract_func_signatures(trace_code)
 
         logger.info(
@@ -173,30 +183,34 @@ JSON: {{"results": [{{"function": "函数名", "real_missing": ["真正缺失的
             sigs[m.group(1)] = params
         return sigs
 
+    _WRITE_TOOLS = {"write", "edit", "create", "create_file", "write_file"}
+    _WRITE_CONTENT_KEYS = ["content", "file_text", "text", "code"]
+
     @staticmethod
     def _get_target_indices(messages: list[dict], is_main: bool) -> list[int]:
-        if is_main:
-            return [mi for mi, m in enumerate(messages) if m.get("role") == "assistant" and ParamRecallEvaluator._has_code_block(m)]
-        return [mi for mi, m in enumerate(messages) if m.get("role") == "assistant"]
+        """找出包含 write/edit 工具调用的 assistant 消息。"""
+        indices = []
+        for mi, msg in enumerate(messages):
+            if msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls", []):
+                fn = tc.get("function", {})
+                if fn.get("name", "") in ParamRecallEvaluator._WRITE_TOOLS:
+                    indices.append(mi)
+                    break
+        return indices
 
     @staticmethod
-    def _has_code_block(msg: dict) -> bool:
-        c = msg.get("content", "")
-        if isinstance(c, str): return "```" in c
-        if isinstance(c, list): return any(i.get("type") == "code" or "```" in (i.get("text", "") or "") for i in c if isinstance(i, dict))
-        return False
-
-    @staticmethod
-    def _extract_code_blocks(msg: dict) -> list[str]:
-        blocks = []
-        c = msg.get("content", "")
-        if isinstance(c, str):
-            for m in re.finditer(r"```(?:\w*\n)?(.*?)```", c, re.DOTALL): blocks.append(m.group(1).strip())
-            if not blocks and c.strip(): blocks.append(c.strip())
-        elif isinstance(c, list):
-            for i in c:
-                if isinstance(i, dict):
-                    if i.get("type") == "code": blocks.append(i.get("text", "") or i.get("content", ""))
-                    elif i.get("type") == "text":
-                        for m in re.finditer(r"```(?:\w*\n)?(.*?)```", i.get("text", ""), re.DOTALL): blocks.append(m.group(1).strip())
-        return blocks
+    def _extract_from_write_args(arguments: str, tool_name: str) -> str:
+        """从 write/edit 工具的 arguments 中提取文件内容。"""
+        try:
+            args = json.loads(arguments) if isinstance(arguments, str) else arguments
+        except (json.JSONDecodeError, TypeError):
+            return ""
+        if not isinstance(args, dict):
+            return ""
+        for key in ParamRecallEvaluator._WRITE_CONTENT_KEYS:
+            val = args.get(key)
+            if isinstance(val, str) and val.strip():
+                return val
+        return ""

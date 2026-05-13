@@ -1,0 +1,45 @@
+# 评估器配置 — 可按需启用/禁用
+evaluators:
+  code_diff:
+    enabled: true
+    weight: 1.0
+    applies_to: [code_completion]
+  function_recall:
+    enabled: true
+    weight: 0.8
+    applies_to: [code_completion, main]
+  param_recall:
+    enabled: true
+    weight: 0.7
+    applies_to: [code_completion, main]
+  file_relevance:
+    enabled: true
+    weight: 0.9
+    applies_to: [file_retrieval]
+  step_relevance:
+    enabled: true
+    weight: 0.9
+    applies_to: [step_retrieval]
+  consistency:
+    enabled: true
+    weight: 0.8
+    applies_to: [consistency_check]
+  tool_call_decision:
+    enabled: true
+    weight: 1.0
+    applies_to: [main]
+
+# 清洗器配置
+cleaner:
+  conflict_resolution: "severity_priority"
+  allow_llm_rewrite: true
+  max_dependency_depth: 3
+
+# LLM 配置 — 兼容任何 OpenAI 兼容 API（公司内网、vLLM、Ollama 等）
+llm:
+  base_url: "http://localhost:8000/v1"
+  api_key: "sk-none"
+  model: "gpt-4"
+  temperature: 0.1
+  timeout: 120
+  max_retries: 3

@@ -36,7 +36,8 @@ class FunctionRecallEvaluator(BaseEvaluator):
         reference: str,
         context: dict[str, Any],
     ) -> list[EvalResult]:
-        required_apis = self._extract_apis_from_code(reference)
+        # reference 中只提取函数定义（不提取调用，避免内置函数噪声）
+        required_apis = self._extract_defs_from_code(reference)
         if not required_apis:
             logger.info(f"[{self.name}] reference 中未提取到 API，跳过")
             return []
@@ -177,7 +178,21 @@ AST 分析发现以下函数/API 在 agent 代码中未出现:
     # ── AST 解析 ──────────────────────────────────────────────────────────
 
     @staticmethod
+    def _extract_defs_from_code(code: str) -> set[str]:
+        """只提取函数/类定义，不提取调用（避免内置函数噪声）。"""
+        defs: set[str] = set()
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return set(re.findall(r"\bdef\s+(\w+)\s*\(", code))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                defs.add(node.name)
+        return defs
+
+    @staticmethod
     def _extract_apis_from_code(code: str) -> set[str]:
+        """提取函数定义 + 调用（用于 trace 侧分析）。"""
         apis: set[str] = set()
         try:
             tree = ast.parse(code)

@@ -12,6 +12,7 @@ class CleaningAction(str, Enum):
     KEEP = "keep"               # 保留原样
     DELETE = "delete"           # 删除该 item / message
     REPLACE = "replace"         # 替换内容（必须提供 new_content）
+    REWRITE = "rewrite"         # LLM 重写（依赖解析器生成）
     INSERT_AFTER = "insert_after"  # 在后面插入（必须提供 new_content）
     DELETE_MESSAGE = "delete_message"  # 删除整条 message
 
@@ -39,6 +40,10 @@ class EvalResult:
     action_reason: str = ""             # 为什么建议这个动作
     new_content: Any = None             # REPLACE / INSERT 时的新内容
 
+    # ── tool_call 级别的替换（代码在 tool_call arguments 里时用）────────────
+    tool_call_replace: dict[str, Any] | None = None
+    # 格式: {"tool_call_id": "xxx", "arg_key": "content", "new_value": "..."}
+
     # ── Debug ─────────────────────────────────────────────────────────────
     debug_info: dict[str, Any] | None = None
 
@@ -56,6 +61,7 @@ class CleaningPlan:
     item_index: int | None = None
     new_content: Any = None
     source: str = ""                    # 来自哪个评估器
+    tool_call_replace: dict[str, Any] | None = None
 
 
 # ── 任务数据 ──────────────────────────────────────────────────────────────

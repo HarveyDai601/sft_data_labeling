@@ -54,24 +54,25 @@ class CodeDiffEvaluator(BaseEvaluator):
             if msg.get("role") != "assistant":
                 continue
 
-            # 1. 优先从 write/edit 工具调用中提取 predict code
             for tc in msg.get("tool_calls", []):
                 fn = tc.get("function", {})
                 tool_name = fn.get("name", "")
                 if tool_name not in _WRITE_TOOL_CONTENT_KEYS:
                     continue
+                tc_id = tc.get("id", "")
                 code = self._extract_from_write_args(fn.get("arguments", ""), tool_name)
                 if not code:
                     continue
                 total_blocks += 1
-                results.extend(self._compare_block(mi, None, code, reference))
+                results.extend(self._compare_block(mi, code, reference, tc_id, tool_name))
 
 
         logger.info(f"[{self.name}] 扫描 {total_blocks} 个代码块, 产出 {len(results)} 条结果")
         return results
 
     def _compare_block(
-        self, mi: int, ii: int | None, predict: str, reference: str
+        self, mi: int, predict: str, reference: str,
+        tc_id: str, tool_name: str,
     ) -> list[EvalResult]:
         """对比一个代码块与 reference。"""
         predict_lines = predict.splitlines(keepends=True)
@@ -88,10 +89,12 @@ class CodeDiffEvaluator(BaseEvaluator):
             elif line.startswith("-") and not line.startswith("---"):
                 removed.append(line[1:])
 
+        total_lines = max(len(predict_lines), len(ref_lines))
         results: list[EvalResult] = []
 
-        # 缺少 reference 中的代码 → 用 reference 替换 predict
+        # 缺少 reference 中的代码 → 替换 tool_call arguments 中的代码
         if removed:
+            missing_ratio = len(removed) / max(total_lines, 1)
             missing_code = "".join(removed)
             snippet = missing_code.strip()[:100]
             logger.info(f"[{self.name}]   msg#{mi} 缺少: {snippet}...")
@@ -102,28 +105,37 @@ class CodeDiffEvaluator(BaseEvaluator):
                     logger.info(f"[{self.name}]   LLM 判断: 功能等价，跳过")
                     return []
 
+            # 找到 tool_call arguments 中内容所在的 key
+            arg_key = self._find_content_key(tool_name, predict)
+
             results.append(
                 EvalResult(
                     message_index=mi,
-                    item_index=ii,
                     dimension=self.name,
                     finding=f"缺少 reference 中的代码: {snippet}...",
-                    confidence=min(1.0, len(removed) * 0.2),
+                    confidence=min(1.0, missing_ratio * 1.5),
                     action=CleaningAction.REPLACE,
                     action_reason="用 reference 代码替换不完整的实现",
                     new_content=reference,
+                    tool_call_replace={
+                        "tool_call_id": tc_id,
+                        "arg_key": arg_key,
+                        "new_value": reference,
+                    },
                     debug_info={
                         "predict_code_preview": predict[:500],
                         "reference_preview": reference[:500],
                         "diff_lines": [l.rstrip() for l in diff],
                         "added_count": len(added),
                         "removed_count": len(removed),
+                        "missing_ratio": round(missing_ratio, 3),
                     },
                 )
             )
 
         # 多余的代码 → 记录但不自动删
         if added and not removed:
+            extra_ratio = len(added) / max(total_lines, 1)
             extra_code = "".join(added)
             snippet = extra_code.strip()[:100]
             logger.info(f"[{self.name}]   msg#{mi} 多余: {snippet}...")
@@ -131,10 +143,9 @@ class CodeDiffEvaluator(BaseEvaluator):
             results.append(
                 EvalResult(
                     message_index=mi,
-                    item_index=ii,
                     dimension=self.name,
                     finding=f"多余的代码: {snippet}...",
-                    confidence=min(1.0, len(added) * 0.15),
+                    confidence=min(1.0, extra_ratio * 1.5),
                     action=CleaningAction.KEEP,
                     action_reason="多余的代码保留，供人工判断是否删除",
                     debug_info={
@@ -142,6 +153,7 @@ class CodeDiffEvaluator(BaseEvaluator):
                         "reference_preview": reference[:500],
                         "diff_lines": [l.rstrip() for l in diff],
                         "extra_lines": [l.rstrip() for l in added],
+                        "extra_ratio": round(extra_ratio, 3),
                     },
                 )
             )
@@ -172,6 +184,12 @@ Predict:
             return False
 
     # ── 工具方法 ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _find_content_key(tool_name: str, code: str) -> str:
+        """找到 tool_call arguments 中存放代码内容的 key。"""
+        keys = _WRITE_TOOL_CONTENT_KEYS.get(tool_name, ["content"])
+        return keys[0]  # 默认第一个 key
 
     @staticmethod
     def _extract_from_write_args(arguments: str, tool_name: str) -> str:

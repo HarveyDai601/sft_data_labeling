@@ -26,9 +26,10 @@ def write_report(
     cleaning_plans: list[CleaningPlan],
     total_messages: int,
 ) -> None:
-    """写入单个 trace 的处理报告。"""
+    """写入单个 trace 的处理报告（markdown + debug JSON）。"""
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    # ── Markdown 报告 ────────────────────────────────────────────────────
     lines: list[str] = []
     lines.append(f"# {trace_name} 处理报告\n")
 
@@ -88,6 +89,38 @@ def write_report(
 
     path.write_text("\n".join(lines), encoding="utf-8")
     logger.info(f"写入报告: {path}")
+
+    # ── Debug JSON ───────────────────────────────────────────────────────
+    debug_path = path.with_suffix(".debug.json")
+    debug_data = {
+        "trace_name": trace_name,
+        "total_messages": total_messages,
+        "eval_results": [
+            {
+                "message_index": r.message_index,
+                "item_index": r.item_index,
+                "dimension": r.dimension,
+                "verdict": r.verdict,
+                "reason": r.reason,
+                "severity": r.severity,
+                "suggested_fix": r.suggested_fix,
+                "debug_info": r.debug_info,
+            }
+            for r in eval_results
+        ],
+        "cleaning_plans": [
+            {
+                "message_index": p.message_index,
+                "item_index": p.item_index,
+                "action": p.action.value,
+                "reason": p.reason,
+                "source": p.source,
+            }
+            for p in cleaning_plans
+        ],
+    }
+    debug_path.write_text(json.dumps(debug_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info(f"写入 debug JSON: {debug_path}")
 
 
 def write_summary(

@@ -19,6 +19,7 @@ class EvalResult:
     reason: str = ""
     severity: float = 0.0               # 0‑1
     suggested_fix: dict[str, Any] | None = None
+    debug_info: dict[str, Any] | None = None  # 中间结果，用于 debug
 
 
 # ── 清洗动作 ──────────────────────────────────────────────────────────────

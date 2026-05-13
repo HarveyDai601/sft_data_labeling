@@ -52,6 +52,12 @@ class CodeDiffEvaluator(BaseEvaluator):
                             reason=v["reason"],
                             severity=v["severity"],
                             suggested_fix=v.get("suggested_fix"),
+                            debug_info={
+                                "predict_code_preview": code[:500],
+                                "reference_preview": reference[:500],
+                                "diff_lines": v.get("diff_lines", []),
+                                "llm_used": self.llm is not None,
+                            },
                         )
                     )
 
@@ -108,6 +114,7 @@ class CodeDiffEvaluator(BaseEvaluator):
                 "reason": f"缺少 reference 中的代码: {snippet}...",
                 "severity": min(1.0, len(removed) * 0.2),
                 "suggested_fix": {"type": "insert", "content": "".join(removed)},
+                "diff_lines": [l.rstrip() for l in diff],
             })
         if added:
             snippet = "".join(added[:3]).strip()[:100]
@@ -117,6 +124,7 @@ class CodeDiffEvaluator(BaseEvaluator):
                 "reason": f"多余的代码: {snippet}...",
                 "severity": min(1.0, len(added) * 0.15),
                 "suggested_fix": {"type": "delete_lines", "content": "".join(added)},
+                "diff_lines": [l.rstrip() for l in diff],
             })
 
         if self.llm and results:

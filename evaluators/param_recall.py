@@ -123,6 +123,13 @@ class ParamRecallEvaluator(BaseEvaluator):
                 reason=f"参数名不匹配: {details}",
                 severity=round(severity, 2),
                 suggested_fix={"suspects": suspects},
+                debug_info={
+                    "reference_signatures": {k: sorted(v) for k, v in ref_sigs.items()},
+                    "trace_signatures": {k: sorted(v) for k, v in trace_sigs.items()},
+                    "suspects": suspects,
+                    "llm_used": self.llm is not None,
+                    "target_messages": target_indices,
+                },
             )
         ]
 

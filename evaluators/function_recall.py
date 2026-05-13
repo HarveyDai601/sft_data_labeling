@@ -110,6 +110,15 @@ class FunctionRecallEvaluator(BaseEvaluator):
                 reason=f"核心 API 缺失: {', '.join(sorted(suspects))}",
                 severity=round(severity, 2),
                 suggested_fix={"missing_functions": sorted(suspects)},
+                debug_info={
+                    "reference_apis": sorted(required_apis),
+                    "trace_apis": sorted(trace_apis),
+                    "suspects_ast": sorted(required_apis - trace_apis),
+                    "confirmed_missing": sorted(suspects),
+                    "llm_used": self.llm is not None,
+                    "target_messages": target_indices,
+                    "trace_code_blocks_count": len(trace_code_blocks),
+                },
             )
         ]
 

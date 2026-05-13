@@ -85,33 +85,39 @@ class Cleaner:
     def _resolve_conflicts(
         self, results: list[EvalResult]
     ) -> tuple[CleaningAction, str, str, Any]:
-        """合并多条评估结果，返回最终 action。"""
+        """合并多条评估结果，返回最终 action。
+
+        策略：
+        - good → KEEP
+        - bad + 有具体修复建议 → REPLACE / DELETE
+        - bad + 无修复建议 → 仅记录，不执行（KEEP）
+        - missing → 仅记录，不执行（KEEP）
+        - REWRITE 只在 cleaner 配置 allow_llm_rewrite=true 且 severity 极高时触发
+        """
         if not results:
             return CleaningAction.KEEP, "", "", None
 
-        # 按 severity 降序排序
-        results.sort(key=lambda r: r.severity, reverse=True)
-
-        # 保守策略：bad > missing > good
+        # 按 verdict 优先级: bad > missing > good
         _priority = {"bad": 0, "missing": 1, "good": 2}
-        results.sort(key=lambda r: _priority.get(r.verdict, 99))
+        results.sort(key=lambda r: (_priority.get(r.verdict, 99), -r.severity))
 
         top = results[0]
 
         if top.verdict == "good":
             return CleaningAction.KEEP, top.reason, top.dimension, None
 
+        # ── bad: 有具体修复建议才执行 ─────────────────────────────────────
         if top.verdict == "bad":
             if top.suggested_fix and top.suggested_fix.get("type") == "delete_lines":
                 return CleaningAction.DELETE, top.reason, top.dimension, None
             if top.suggested_fix and top.suggested_fix.get("type") == "replace":
                 return CleaningAction.REPLACE, top.reason, top.dimension, top.suggested_fix.get("content")
-            if top.severity >= 0.8:
-                return CleaningAction.REWRITE, top.reason, top.dimension, None
-            return CleaningAction.DELETE, top.reason, top.dimension, None
+            # 无具体建议 → 只记录，不执行清洗
+            return CleaningAction.KEEP, f"[仅记录] {top.reason}", top.dimension, None
 
+        # ── missing: 只记录，不自动插入 ────────────────────────────────────
         if top.verdict == "missing":
-            return CleaningAction.INSERT_AFTER, top.reason, top.dimension, top.suggested_fix
+            return CleaningAction.KEEP, f"[仅记录] {top.reason}", top.dimension, None
 
         return CleaningAction.KEEP, "", "", None
 

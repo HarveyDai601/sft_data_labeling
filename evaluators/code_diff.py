@@ -1,4 +1,11 @@
-"""代码差异评估器 — predict vs reference 逐行 diff + LLM 语义判断。"""
+"""代码差异评估器 — predict vs reference 逐行 diff + LLM 语义判断。
+
+评估逻辑：
+- 无差异 → KEEP
+- 有多余代码 → DELETE（有具体内容）
+- 有缺失代码 → REPLACE（用 reference 替换 predict）
+- LLM 判断功能等价 → KEEP
+"""
 
 from __future__ import annotations
 
@@ -7,7 +14,7 @@ import logging
 import re
 from typing import Any
 
-from core.models import EvalResult
+from core.models import CleaningAction, EvalResult
 from evaluators.base import BaseEvaluator
 from llm.client import LLMClient
 
@@ -28,7 +35,6 @@ class CodeDiffEvaluator(BaseEvaluator):
     ) -> list[EvalResult]:
         results: list[EvalResult] = []
         total_blocks = 0
-        diff_blocks = 0
 
         for mi, msg in enumerate(messages):
             if msg.get("role") != "assistant":
@@ -36,38 +42,114 @@ class CodeDiffEvaluator(BaseEvaluator):
             code_blocks = self._extract_code_blocks(msg)
             for ii, code in enumerate(code_blocks):
                 total_blocks += 1
-                verdicts = self._compare_code(code, reference)
-                if verdicts:
-                    diff_blocks += 1
-                    logger.info(
-                        f"[{self.name}] msg#{mi} item#{ii}: 发现 {len(verdicts)} 个差异"
-                    )
-                for v in verdicts:
-                    results.append(
-                        EvalResult(
-                            message_index=mi,
-                            item_index=ii,
-                            dimension=self.name,
-                            verdict=v["verdict"],
-                            reason=v["reason"],
-                            severity=v["severity"],
-                            suggested_fix=v.get("suggested_fix"),
-                            debug_info={
-                                "predict_code_preview": code[:500],
-                                "reference_preview": reference[:500],
-                                "diff_lines": v.get("diff_lines", []),
-                                "llm_used": self.llm is not None,
-                            },
-                        )
-                    )
+                block_results = self._compare_block(mi, ii, code, reference)
+                results.extend(block_results)
 
-        logger.info(
-            f"[{self.name}] 扫描 {total_blocks} 个代码块, "
-            f"{diff_blocks} 个有差异, 产出 {len(results)} 条评估结果"
-        )
+        logger.info(f"[{self.name}] 扫描 {total_blocks} 个代码块, 产出 {len(results)} 条结果")
         return results
 
-    # ── 内部方法 ──────────────────────────────────────────────────────────
+    def _compare_block(
+        self, mi: int, ii: int, predict: str, reference: str
+    ) -> list[EvalResult]:
+        """对比一个代码块与 reference。"""
+        predict_lines = predict.splitlines(keepends=True)
+        ref_lines = reference.splitlines(keepends=True)
+
+        diff = list(difflib.unified_diff(ref_lines, predict_lines, lineterm=""))
+        if not diff:
+            return []
+
+        added, removed = [], []
+        for line in diff:
+            if line.startswith("+") and not line.startswith("+++"):
+                added.append(line[1:])
+            elif line.startswith("-") and not line.startswith("---"):
+                removed.append(line[1:])
+
+        results: list[EvalResult] = []
+
+        # 缺少 reference 中的代码 → 用 reference 替换 predict
+        if removed:
+            missing_code = "".join(removed)
+            snippet = missing_code.strip()[:100]
+            logger.info(f"[{self.name}]   msg#{mi} item#{ii} 缺少: {snippet}...")
+
+            # LLM 判断是否功能等价
+            if self.llm:
+                if self._llm_is_equivalent(predict, reference):
+                    logger.info(f"[{self.name}]   LLM 判断: 功能等价，跳过")
+                    return []
+
+            results.append(
+                EvalResult(
+                    message_index=mi,
+                    item_index=ii,
+                    dimension=self.name,
+                    finding=f"缺少 reference 中的代码: {snippet}...",
+                    confidence=min(1.0, len(removed) * 0.2),
+                    action=CleaningAction.REPLACE,
+                    action_reason="用 reference 代码替换不完整的实现",
+                    new_content=reference,
+                    debug_info={
+                        "predict_code_preview": predict[:500],
+                        "reference_preview": reference[:500],
+                        "diff_lines": [l.rstrip() for l in diff],
+                        "added_count": len(added),
+                        "removed_count": len(removed),
+                    },
+                )
+            )
+
+        # 多余的代码 → 删除
+        if added and not removed:
+            extra_code = "".join(added)
+            snippet = extra_code.strip()[:100]
+            logger.info(f"[{self.name}]   msg#{mi} item#{ii} 多余: {snippet}...")
+
+            results.append(
+                EvalResult(
+                    message_index=mi,
+                    item_index=ii,
+                    dimension=self.name,
+                    finding=f"多余的代码: {snippet}...",
+                    confidence=min(1.0, len(added) * 0.15),
+                    action=CleaningAction.KEEP,  # 多余的代码不自动删，记录供人工检查
+                    action_reason="多余的代码保留，供人工判断是否删除",
+                    debug_info={
+                        "predict_code_preview": predict[:500],
+                        "reference_preview": reference[:500],
+                        "diff_lines": [l.rstrip() for l in diff],
+                        "extra_lines": [l.rstrip() for l in added],
+                    },
+                )
+            )
+
+        return results
+
+    def _llm_is_equivalent(self, predict: str, reference: str) -> bool:
+        """LLM 判断两段代码是否功能等价。"""
+        prompt = f"""比较以下两段代码，判断它们是否功能等价（实现方式不同但结果相同）。
+
+Reference:
+```
+{reference[:2000]}
+```
+
+Predict:
+```
+{predict[:2000]}
+```
+
+只回答 JSON: {{"equivalent": true/false, "reason": "一句话原因"}}"""
+
+        try:
+            resp = self.llm.chat_json([{"role": "user", "content": prompt}], temperature=0.0)
+            return resp.get("equivalent", False)
+        except Exception as e:
+            logger.warning(f"[{self.name}] LLM 判断失败: {e}")
+            return False
+
+    # ── 工具方法 ──────────────────────────────────────────────────────────
 
     @staticmethod
     def _extract_code_blocks(msg: dict) -> list[str]:
@@ -88,80 +170,3 @@ class CodeDiffEvaluator(BaseEvaluator):
                         for m in re.finditer(r"```(?:\w*\n)?(.*?)```", text, re.DOTALL):
                             blocks.append(m.group(1).strip())
         return blocks
-
-    def _compare_code(self, predict: str, reference: str) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
-
-        predict_lines = predict.splitlines(keepends=True)
-        ref_lines = reference.splitlines(keepends=True)
-
-        diff = list(difflib.unified_diff(ref_lines, predict_lines, lineterm=""))
-        if not diff:
-            return []
-
-        added, removed = [], []
-        for line in diff:
-            if line.startswith("+") and not line.startswith("+++"):
-                added.append(line[1:])
-            elif line.startswith("-") and not line.startswith("---"):
-                removed.append(line[1:])
-
-        if removed:
-            snippet = "".join(removed[:3]).strip()[:100]
-            logger.info(f"[{self.name}]   缺少: {snippet}...")
-            results.append({
-                "verdict": "bad",
-                "reason": f"缺少 reference 中的代码: {snippet}...",
-                "severity": min(1.0, len(removed) * 0.2),
-                "suggested_fix": {"type": "insert", "content": "".join(removed)},
-                "diff_lines": [l.rstrip() for l in diff],
-            })
-        if added:
-            snippet = "".join(added[:3]).strip()[:100]
-            logger.info(f"[{self.name}]   多余: {snippet}...")
-            results.append({
-                "verdict": "bad",
-                "reason": f"多余的代码: {snippet}...",
-                "severity": min(1.0, len(added) * 0.15),
-                "suggested_fix": {"type": "delete_lines", "content": "".join(added)},
-                "diff_lines": [l.rstrip() for l in diff],
-            })
-
-        if self.llm and results:
-            semantic = self._llm_semantic_check(predict, reference)
-            if semantic:
-                results.append(semantic)
-
-        return results
-
-    def _llm_semantic_check(self, predict: str, reference: str) -> dict[str, Any] | None:
-        prompt = f"""比较以下两段代码，判断它们是否功能等价。
-
-Reference 代码:
-```
-{reference}
-```
-
-Predict 代码:
-```
-{predict}
-```
-
-请用 JSON 回答:
-{{"equivalent": true/false, "reason": "原因", "severity": 0.0-1.0}}"""
-
-        try:
-            resp = self.llm.chat_json([{"role": "user", "content": prompt}])
-            if resp.get("equivalent"):
-                logger.info(f"[{self.name}] LLM 判断: 功能等价")
-                return None
-            reason = resp.get("reason", "")
-            logger.info(f"[{self.name}] LLM 判断: 功能不等价 — {reason}")
-            return {
-                "verdict": "bad",
-                "reason": f"LLM 判断功能不等价: {reason}",
-                "severity": resp.get("severity", 0.5),
-            }
-        except Exception as e:
-            logger.warning(f"[{self.name}] LLM 语义检查失败: {e}")
-            return None

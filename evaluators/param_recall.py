@@ -1,12 +1,8 @@
 """参数准召率评估器 — AST 初筛 + LLM 终判。
 
-流程：
-1. AST 从 reference 函数定义中提取参数名
-2. AST 从 trace 函数定义中提取参数名
-3. 差集 = 疑点（可能缺失/不同的参数）
-4. LLM 对疑点做语义判断：参数名不同但语义等价？
-
-无 LLM 时退化为纯 AST 规则。
+评估逻辑：
+- 参数匹配 → KEEP
+- 参数不匹配 → KEEP（观察记录，无法自动生成正确参数名）
 """
 
 from __future__ import annotations
@@ -16,7 +12,7 @@ import logging
 import re
 from typing import Any
 
-from core.models import EvalResult
+from core.models import CleaningAction, EvalResult
 from evaluators.base import BaseEvaluator
 from llm.client import LLMClient
 
@@ -37,7 +33,6 @@ class ParamRecallEvaluator(BaseEvaluator):
         reference: str,
         context: dict[str, Any],
     ) -> list[EvalResult]:
-        # ── Step 1: AST 提取 reference 函数签名 ───────────────────────────
         ref_sigs = self._extract_func_signatures(reference)
         if not ref_sigs:
             logger.info(f"[{self.name}] reference 中未提取到函数签名，跳过")
@@ -46,13 +41,10 @@ class ParamRecallEvaluator(BaseEvaluator):
         is_main = context.get("trace_type") == "main"
         target_indices = self._get_target_indices(messages, is_main)
         if not target_indices:
-            logger.info(f"[{self.name}] 无目标 assistant message，跳过")
             return []
 
-        # ── Step 2: AST 提取 trace 函数签名 ───────────────────────────────
         trace_code = "\n".join(
-            code
-            for mi in target_indices
+            code for mi in target_indices
             for code in self._extract_code_blocks(messages[mi])
         )
         trace_sigs = self._extract_func_signatures(trace_code)
@@ -62,91 +54,61 @@ class ParamRecallEvaluator(BaseEvaluator):
             f"trace 签名: { {k: sorted(v) for k, v in trace_sigs.items()} }"
         )
 
-        # ── Step 3: 按函数配对，找参数差异 ────────────────────────────────
         suspects: list[dict[str, Any]] = []
         for func_name, ref_params in ref_sigs.items():
             if func_name not in trace_sigs:
-                logger.info(f"[{self.name}] 函数 {func_name} 在 trace 中未定义（由 function_recall 处理）")
                 continue
             trace_params = trace_sigs[func_name]
-            missing_params = ref_params - trace_params
-            if missing_params:
+            missing = ref_params - trace_params
+            if missing:
                 suspects.append({
                     "function": func_name,
                     "ref_params": sorted(ref_params),
                     "trace_params": sorted(trace_params),
-                    "missing": sorted(missing_params),
+                    "missing": sorted(missing),
                 })
 
         if not suspects:
-            logger.info(f"[{self.name}] 所有函数参数匹配，无差异")
             return []
 
         logger.info(
-            f"[{self.name}] 疑点（AST 差集）: "
+            f"[{self.name}] 疑点: "
             + "; ".join(f"{s['function']} 缺失 {s['missing']}" for s in suspects)
         )
 
-        # ── Step 4: LLM 终判 ─────────────────────────────────────────────
         if self.llm:
-            before_count = sum(len(s["missing"]) for s in suspects)
             suspects = self._llm_verify(trace_code, suspects)
-            after_count = sum(len(s["missing"]) for s in suspects) if suspects else 0
-            if before_count > after_count:
-                logger.info(f"[{self.name}] LLM 过滤掉 {before_count - after_count} 个语义等价的参数")
             if not suspects:
-                logger.info(f"[{self.name}] LLM 判断全部为语义等价，无真正缺失")
                 return []
 
-        # ── 生成结果 ─────────────────────────────────────────────────────
-        all_missing = [s["missing"] for s in suspects]
-        flat_missing = [p for group in all_missing for p in group]
-        total_ref_params = sum(len(params) for params in ref_sigs.values())
-        missing_ratio = len(flat_missing) / max(total_ref_params, 1)
-        severity = min(1.0, missing_ratio * 1.5)
-
-        details = "; ".join(
-            f"{s['function']}({', '.join(s['missing'])})"
-            for s in suspects
-        )
-
-        logger.info(
-            f"[{self.name}] 最终结果: {details}, "
-            f"missing_ratio={missing_ratio:.2f}, severity={severity:.2f}"
-        )
+        details = "; ".join(f"{s['function']}({', '.join(s['missing'])})" for s in suspects)
+        total_ref = sum(len(v) for v in ref_sigs.values())
+        flat = [p for s in suspects for p in s["missing"]]
+        confidence = min(1.0, len(flat) / max(total_ref, 1) * 1.5)
 
         return [
             EvalResult(
                 message_index=target_indices[-1],
                 dimension=self.name,
-                verdict="missing",
-                reason=f"参数名不匹配: {details}",
-                severity=round(severity, 2),
-                suggested_fix={"suspects": suspects},
+                finding=f"参数名不匹配: {details}",
+                confidence=round(confidence, 2),
+                action=CleaningAction.KEEP,
+                action_reason="无法自动生成正确参数名，仅记录",
                 debug_info={
                     "reference_signatures": {k: sorted(v) for k, v in ref_sigs.items()},
                     "trace_signatures": {k: sorted(v) for k, v in trace_sigs.items()},
                     "suspects": suspects,
                     "llm_used": self.llm is not None,
-                    "target_messages": target_indices,
                 },
             )
         ]
 
-    # ── LLM 终判 ──────────────────────────────────────────────────────────
-
-    def _llm_verify(
-        self,
-        trace_code: str,
-        suspects: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        suspect_desc = "\n".join(
-            f"- {s['function']}: reference 参数 {s['ref_params']}, "
-            f"trace 参数 {s['trace_params']}, 缺失 {s['missing']}"
+    def _llm_verify(self, trace_code: str, suspects: list[dict]) -> list[dict]:
+        desc = "\n".join(
+            f"- {s['function']}: ref {s['ref_params']}, trace {s['trace_params']}, 缺失 {s['missing']}"
             for s in suspects
         )
-
-        prompt = f"""你是一个代码审查专家。以下是 agent 产出的代码和参数差异分析。
+        prompt = f"""判断以下参数差异是否为真正缺失。
 
 Agent 代码:
 ```python
@@ -154,44 +116,28 @@ Agent 代码:
 ```
 
 参数差异:
-{suspect_desc}
+{desc}
 
-请判断：每个函数的参数名差异是否是**真正的缺失**？
+判断标准：参数名不同但语义等价（如 data/input_data）→ 不是缺失。
 
-判断标准：
-- 如果 trace 的参数名与 reference 不同但语义等价（如 data/input_data, config/cfg）→ 不是缺失
-- 如果 trace 确实漏掉了功能上必须的参数 → 是缺失
-- 如果 trace 的实现方式不同，不需要该参数 → 不是缺失
-
-请用 JSON 回答:
-{{"results": [{{"function": "函数名", "real_missing": ["真正缺失的参数"], "equivalent": ["语义等价的参数"]}}]}}"""
+JSON: {{"results": [{{"function": "函数名", "real_missing": ["真正缺失的参数"], "equivalent": ["语义等价的参数"]}}]}}"""
 
         try:
-            resp = self.llm.chat_json(
-                [{"role": "user", "content": prompt}],
-                temperature=0.0,
-            )
-            confirmed: list[dict[str, Any]] = []
+            resp = self.llm.chat_json([{"role": "user", "content": prompt}], temperature=0.0)
+            confirmed = []
             for r in resp.get("results", []):
-                real_missing = set(r.get("real_missing", []))
                 equiv = r.get("equivalent", [])
                 if equiv:
                     logger.info(f"[{self.name}] LLM 判断 {r['function']} 中 {equiv} 为语义等价")
-                if real_missing:
+                real = set(r.get("real_missing", []))
+                if real:
                     for s in suspects:
                         if s["function"] == r["function"]:
-                            confirmed.append({
-                                "function": s["function"],
-                                "ref_params": s["ref_params"],
-                                "trace_params": s["trace_params"],
-                                "missing": sorted(real_missing),
-                            })
+                            confirmed.append({**s, "missing": sorted(real)})
             return confirmed
         except Exception as e:
-            logger.warning(f"[{self.name}] LLM 验证失败，退化为 AST 规则: {e}")
+            logger.warning(f"[{self.name}] LLM 验证失败: {e}")
             return suspects
-
-    # ── AST 解析 ──────────────────────────────────────────────────────────
 
     @staticmethod
     def _extract_func_signatures(code: str) -> dict[str, set[str]]:
@@ -200,10 +146,9 @@ Agent 代码:
             tree = ast.parse(code)
         except SyntaxError:
             return ParamRecallEvaluator._extract_func_signatures_regex(code)
-
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                params: set[str] = set()
+                params = set()
                 for arg in node.args.args:
                     if arg.arg not in ParamRecallEvaluator._IGNORED_PARAMS:
                         params.add(arg.arg)
@@ -222,59 +167,36 @@ Agent 代码:
         code = re.sub(r'"""[\s\S]*?"""', '', code)
         code = re.sub(r"'''[\s\S]*?'''", '', code)
         code = re.sub(r'#.*$', '', code, flags=re.MULTILINE)
-
-        sigs: dict[str, set[str]] = {}
+        sigs = {}
         for m in re.finditer(r"def\s+(\w+)\s*\(([^)]*)\)", code):
-            func_name = m.group(1)
-            sig = m.group(2)
-            params = {
-                arg for arg in re.findall(r"[\*]*(\w+)", sig)
-                if arg not in ParamRecallEvaluator._IGNORED_PARAMS
-            }
-            sigs[func_name] = params
+            params = {a for a in re.findall(r"[\*]*(\w+)", m.group(2)) if a not in ParamRecallEvaluator._IGNORED_PARAMS}
+            sigs[m.group(1)] = params
         return sigs
-
-    # ── 工具方法 ──────────────────────────────────────────────────────────
 
     @staticmethod
     def _get_target_indices(messages: list[dict], is_main: bool) -> list[int]:
         if is_main:
-            return [
-                mi for mi, msg in enumerate(messages)
-                if msg.get("role") == "assistant" and ParamRecallEvaluator._has_code_block(msg)
-            ]
-        return [
-            mi for mi, msg in enumerate(messages)
-            if msg.get("role") == "assistant"
-        ]
+            return [mi for mi, m in enumerate(messages) if m.get("role") == "assistant" and ParamRecallEvaluator._has_code_block(m)]
+        return [mi for mi, m in enumerate(messages) if m.get("role") == "assistant"]
 
     @staticmethod
-    def _has_code_block(msg: dict[str, Any]) -> bool:
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            return "```" in content
-        if isinstance(content, list):
-            return any(
-                item.get("type") == "code" or "```" in (item.get("text", "") or "")
-                for item in content if isinstance(item, dict)
-            )
+    def _has_code_block(msg: dict) -> bool:
+        c = msg.get("content", "")
+        if isinstance(c, str): return "```" in c
+        if isinstance(c, list): return any(i.get("type") == "code" or "```" in (i.get("text", "") or "") for i in c if isinstance(i, dict))
         return False
 
     @staticmethod
-    def _extract_code_blocks(msg: dict[str, Any]) -> list[str]:
-        blocks: list[str] = []
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            for m in re.finditer(r"```(?:\w*\n)?(.*?)```", content, re.DOTALL):
-                blocks.append(m.group(1).strip())
-            if not blocks and content.strip():
-                blocks.append(content.strip())
-        elif isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict):
-                    if item.get("type") == "code":
-                        blocks.append(item.get("text", "") or item.get("content", ""))
-                    elif item.get("type") == "text":
-                        for m in re.finditer(r"```(?:\w*\n)?(.*?)```", item.get("text", ""), re.DOTALL):
-                            blocks.append(m.group(1).strip())
+    def _extract_code_blocks(msg: dict) -> list[str]:
+        blocks = []
+        c = msg.get("content", "")
+        if isinstance(c, str):
+            for m in re.finditer(r"```(?:\w*\n)?(.*?)```", c, re.DOTALL): blocks.append(m.group(1).strip())
+            if not blocks and c.strip(): blocks.append(c.strip())
+        elif isinstance(c, list):
+            for i in c:
+                if isinstance(i, dict):
+                    if i.get("type") == "code": blocks.append(i.get("text", "") or i.get("content", ""))
+                    elif i.get("type") == "text":
+                        for m in re.finditer(r"```(?:\w*\n)?(.*?)```", i.get("text", ""), re.DOTALL): blocks.append(m.group(1).strip())
         return blocks

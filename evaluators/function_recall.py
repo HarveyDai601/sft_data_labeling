@@ -1,12 +1,11 @@
 """函数准召率评估器 — AST 初筛 + LLM 终判。
 
-流程：
-1. AST 从 reference 提取所有函数定义 + 非内置调用 → "期望 API 集合"
-2. AST 从 trace 代码块提取实际出现的 → "实际 API 集合"
-3. 差集 = 疑点（可能缺失的 API）
-4. LLM 对疑点做语义判断：是真的缺失，还是有等价实现？
+评估逻辑：
+- 所有 API 都出现 → KEEP
+- 有缺失 → KEEP（观察记录，不自动修改代码）
+  - 因为无法自动生成缺失函数的实现代码
 
-无 LLM 时退化为纯 AST 规则。
+debug_info 中提供完整的中间数据供人工验证。
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ import logging
 import re
 from typing import Any
 
-from core.models import EvalResult
+from core.models import CleaningAction, EvalResult
 from evaluators.base import BaseEvaluator
 from llm.client import LLMClient
 
@@ -35,7 +34,6 @@ class FunctionRecallEvaluator(BaseEvaluator):
         reference: str,
         context: dict[str, Any],
     ) -> list[EvalResult]:
-        # ── Step 1: AST 提取期望 API ─────────────────────────────────────
         required_apis = self._extract_apis_from_code(reference)
         if not required_apis:
             logger.info(f"[{self.name}] reference 中未提取到 API，跳过")
@@ -47,7 +45,7 @@ class FunctionRecallEvaluator(BaseEvaluator):
             logger.info(f"[{self.name}] 无目标 assistant message，跳过")
             return []
 
-        # ── Step 2: AST 提取 trace 实际 API ───────────────────────────────
+        # 提取 trace 中的 API
         trace_code_blocks: list[str] = []
         for mi in target_indices:
             trace_code_blocks.extend(self._extract_code_blocks(messages[mi]))
@@ -61,7 +59,7 @@ class FunctionRecallEvaluator(BaseEvaluator):
             f"trace API: {sorted(trace_apis)}"
         )
 
-        # ── Step 3: 差集 = 疑点 ───────────────────────────────────────────
+        # 差集 = 疑点
         suspects = required_apis - trace_apis
         if not suspects:
             logger.info(f"[{self.name}] 所有 API 均已出现，无缺失")
@@ -69,11 +67,13 @@ class FunctionRecallEvaluator(BaseEvaluator):
 
         logger.info(f"[{self.name}] 疑点（AST 差集）: {sorted(suspects)}")
 
-        # ── Step 4: LLM 终判 ─────────────────────────────────────────────
+        # LLM 终判
+        llm_rejected: set[str] = set()
         if self.llm:
             confirmed, rejected = self._llm_verify(
                 reference, "\n".join(trace_code_blocks), suspects
             )
+            llm_rejected = rejected
             if rejected:
                 logger.info(f"[{self.name}] LLM 过滤掉的误报: {sorted(rejected)}")
             if not confirmed:
@@ -82,38 +82,38 @@ class FunctionRecallEvaluator(BaseEvaluator):
             suspects = confirmed
             logger.info(f"[{self.name}] LLM 确认真正缺失: {sorted(suspects)}")
         else:
-            # 无 LLM，用启发式过滤：只保留 reference 中的顶层函数定义
             ref_defs = self._extract_top_level_defs(reference)
             before = suspects.copy()
             suspects = suspects & ref_defs
-            filtered = before - suspects
-            if filtered:
-                logger.info(f"[{self.name}] 无 LLM，启发式过滤掉非顶层定义: {sorted(filtered)}")
+            llm_rejected = before - suspects
+            if llm_rejected:
+                logger.info(f"[{self.name}] 启发式过滤: {sorted(llm_rejected)}")
 
         if not suspects:
             return []
 
-        # ── 生成结果 ─────────────────────────────────────────────────────
+        # 输出：只观察，不执行清洗
         missing_ratio = len(suspects) / len(required_apis)
-        severity = min(1.0, missing_ratio * 1.5)
+        confidence = min(1.0, missing_ratio * 1.5)
 
         logger.info(
-            f"[{self.name}] 最终结果: 缺失 {sorted(suspects)}, "
-            f"missing_ratio={missing_ratio:.2f}, severity={severity:.2f}"
+            f"[{self.name}] 最终: 缺失 {sorted(suspects)}, "
+            f"confidence={confidence:.2f}"
         )
 
         return [
             EvalResult(
                 message_index=target_indices[-1],
                 dimension=self.name,
-                verdict="missing",
-                reason=f"核心 API 缺失: {', '.join(sorted(suspects))}",
-                severity=round(severity, 2),
-                suggested_fix={"missing_functions": sorted(suspects)},
+                finding=f"核心 API 缺失: {', '.join(sorted(suspects))}",
+                confidence=round(confidence, 2),
+                action=CleaningAction.KEEP,
+                action_reason="无法自动生成缺失函数实现，仅记录",
                 debug_info={
                     "reference_apis": sorted(required_apis),
                     "trace_apis": sorted(trace_apis),
                     "suspects_ast": sorted(required_apis - trace_apis),
+                    "llm_rejected": sorted(llm_rejected),
                     "confirmed_missing": sorted(suspects),
                     "llm_used": self.llm is not None,
                     "target_messages": target_indices,
@@ -125,10 +125,7 @@ class FunctionRecallEvaluator(BaseEvaluator):
     # ── LLM 终判 ──────────────────────────────────────────────────────────
 
     def _llm_verify(
-        self,
-        reference: str,
-        trace_code: str,
-        suspects: set[str],
+        self, reference: str, trace_code: str, suspects: set[str],
     ) -> tuple[set[str], set[str]]:
         suspects_list = ", ".join(sorted(suspects))
         prompt = f"""你是一个代码审查专家。以下是 reference 代码和 agent 实际产出的代码。
@@ -151,17 +148,14 @@ AST 分析发现以下函数/API 在 agent 代码中未出现:
 判断标准：
 - 如果 reference 中定义了该函数且它是核心逻辑 → 必须
 - 如果 trace 用了不同的库/方法实现了相同功能 → 不必须（等价实现）
-- 如果是工具性调用（如 json.dumps, os.path.join）且 trace 用了替代方案 → 不必须
+- 如果是工具性调用且 trace 用了替代方案 → 不必须
 - 如果是 reference 中的核心业务函数且 trace 完全没实现 → 必须
 
 请用 JSON 回答:
 {{"confirmed": ["真正缺失的API列表"], "rejected": ["有等价实现的API列表"], "reasons": {{"API名": "判断原因"}}}}"""
 
         try:
-            resp = self.llm.chat_json(
-                [{"role": "user", "content": prompt}],
-                temperature=0.0,
-            )
+            resp = self.llm.chat_json([{"role": "user", "content": prompt}], temperature=0.0)
             confirmed = set(resp.get("confirmed", []))
             rejected = set(resp.get("rejected", []))
             reasons = resp.get("reasons", {})
@@ -169,7 +163,7 @@ AST 分析发现以下函数/API 在 agent 代码中未出现:
                 logger.info(f"[{self.name}] LLM 判断 {api}: {reason}")
             return confirmed, rejected
         except Exception as e:
-            logger.warning(f"[{self.name}] LLM 验证失败，退化为 AST 规则: {e}")
+            logger.warning(f"[{self.name}] LLM 验证失败: {e}")
             ref_defs = self._extract_top_level_defs(reference)
             return suspects & ref_defs, set()
 
@@ -182,7 +176,6 @@ AST 分析发现以下函数/API 在 agent 代码中未出现:
             tree = ast.parse(code)
         except SyntaxError:
             return set(re.findall(r"\bdef\s+(\w+)\s*\(", code))
-
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 apis.add(node.name)
@@ -199,7 +192,6 @@ AST 分析发现以下函数/API 在 agent 代码中未出现:
             tree = ast.parse(code)
         except SyntaxError:
             return set(re.findall(r"\bdef\s+(\w+)\s*\(", code))
-
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 defs.add(node.name)
@@ -222,10 +214,7 @@ AST 分析发现以下函数/API 在 agent 代码中未出现:
                 mi for mi, msg in enumerate(messages)
                 if msg.get("role") == "assistant" and FunctionRecallEvaluator._has_code_block(msg)
             ]
-        return [
-            mi for mi, msg in enumerate(messages)
-            if msg.get("role") == "assistant"
-        ]
+        return [mi for mi, msg in enumerate(messages) if msg.get("role") == "assistant"]
 
     @staticmethod
     def _has_code_block(msg: dict[str, Any]) -> bool:

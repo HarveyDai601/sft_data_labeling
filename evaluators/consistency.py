@@ -1,11 +1,11 @@
-"""一致性检查评估器 — 检查结果是否正确识别了不一致。"""
+"""一致性检查评估器。"""
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from core.models import EvalResult
+from core.models import CleaningAction, EvalResult
 from evaluators.base import BaseEvaluator
 from llm.client import LLMClient
 
@@ -25,99 +25,63 @@ class ConsistencyEvaluator(BaseEvaluator):
         context: dict[str, Any],
     ) -> list[EvalResult]:
         results: list[EvalResult] = []
-        checks = 0
 
         for mi, msg in enumerate(messages):
             if msg.get("role") != "tool":
                 continue
             content = self._msg_text(msg)
-            if not content:
+            check = self._parse(content)
+            if check is None:
                 continue
 
-            check_result = self._parse_consistency_result(content)
-            if check_result is None:
-                continue
-
-            checks += 1
-            logger.info(
-                f"[{self.name}] msg#{mi}: 一致性检查结论 — "
-                f"{'一致' if check_result.get('consistent') else '不一致'}"
-            )
+            logger.info(f"[{self.name}] msg#{mi}: {'一致' if check['consistent'] else '不一致'}")
 
             if self.llm:
-                verdict = self._llm_verify(content, reference)
-                if verdict:
-                    logger.info(f"[{self.name}]   LLM 判断: 结论错误 — {verdict['reason']}")
-                    results.append(
-                        EvalResult(
-                            message_index=mi,
-                            dimension=self.name,
-                            verdict=verdict["verdict"],
-                            reason=verdict["reason"],
-                            severity=verdict["severity"],
-                        )
-                    )
-                else:
-                    logger.info(f"[{self.name}]   LLM 判断: 结论正确")
+                err = self._llm_verify(content, reference)
+                if err:
+                    results.append(EvalResult(
+                        message_index=mi, dimension=self.name,
+                        finding=f"一致性检查结论错误: {err}",
+                        confidence=0.7,
+                        action=CleaningAction.KEEP,
+                        action_reason="无法自动修正一致性检查结论，仅记录",
+                    ))
             else:
-                if check_result.get("consistent") and "error" in content.lower():
-                    logger.info(f"[{self.name}]   启发式判断: 声称一致但含错误标记")
-                    results.append(
-                        EvalResult(
-                            message_index=mi,
-                            dimension=self.name,
-                            verdict="bad",
-                            reason="一致性检查声称一致但内容包含错误标记",
-                            severity=0.6,
-                        )
-                    )
+                if check["consistent"] and "error" in content.lower():
+                    results.append(EvalResult(
+                        message_index=mi, dimension=self.name,
+                        finding="声称一致但含错误标记",
+                        confidence=0.6,
+                        action=CleaningAction.KEEP,
+                        action_reason="仅记录",
+                    ))
 
-        logger.info(f"[{self.name}] 扫描 {checks} 次一致性检查, 产出 {len(results)} 条评估结果")
         return results
 
-    # ── 内部方法 ──────────────────────────────────────────────────────────
-
     @staticmethod
-    def _parse_consistency_result(content: str) -> dict[str, Any] | None:
-        content_lower = content.lower()
-        if "consistent" in content_lower or "inconsistent" in content_lower:
-            return {"consistent": "inconsistent" not in content_lower}
+    def _parse(content: str) -> dict | None:
+        low = content.lower()
+        if "consistent" in low or "inconsistent" in low:
+            return {"consistent": "inconsistent" not in low}
         return None
 
-    def _llm_verify(self, check_content: str, reference: str) -> dict[str, Any] | None:
-        prompt = f"""以下是一次代码一致性检查的结果。请判断这个检查结论是否正确。
+    def _llm_verify(self, check_content: str, reference: str) -> str | None:
+        prompt = f"""判断一致性检查结论是否正确。
 
-一致性检查结果:
-{check_content}
+检查结果: {check_content[:500]}
+Reference: {reference[:1000]}
 
-Reference 代码:
-```
-{reference}
-```
-
-请用 JSON 回答:
-{{"correct": true/false, "reason": "原因", "severity": 0.0-1.0}}"""
-
+JSON: {{"correct": true/false, "reason": "原因"}}"""
         try:
-            resp = self.llm.chat_json([{"role": "user", "content": prompt}])
-            if resp.get("correct"):
-                return None
-            return {
-                "verdict": "bad",
-                "reason": f"一致性检查结论错误: {resp.get('reason', '')}",
-                "severity": resp.get("severity", 0.5),
-            }
+            resp = self.llm.chat_json([{"role": "user", "content": prompt}], temperature=0.0)
+            return None if resp.get("correct") else resp.get("reason", "")
         except Exception as e:
-            logger.warning(f"[{self.name}] LLM 验证失败: {e}")
+            logger.warning(f"[{self.name}] LLM 失败: {e}")
             return None
 
     @staticmethod
-    def _msg_text(msg: dict[str, Any]) -> str:
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            return " ".join(
-                item.get("text", "") for item in content if isinstance(item, dict)
-            )
+    def _msg_text(msg: dict) -> str:
+        c = msg.get("content", "")
+        if isinstance(c, str): return c
+        if isinstance(c, list): return " ".join(i.get("text", "") for i in c if isinstance(i, dict))
         return ""

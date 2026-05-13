@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from core.models import EvalResult
+from core.models import CleaningAction, EvalResult
 from evaluators.base import BaseEvaluator
 
 logger = logging.getLogger(__name__)
@@ -28,63 +28,44 @@ class ToolCallEvaluator(BaseEvaluator):
         context: dict[str, Any],
     ) -> list[EvalResult]:
         results: list[EvalResult] = []
-        call_history: list[tuple[int, str]] = []
+        calls = [
+            (mi, tc.get("function", {}).get("name", ""))
+            for mi, msg in enumerate(messages)
+            if msg.get("role") == "assistant"
+            for tc in msg.get("tool_calls", [])
+            if tc.get("function", {}).get("name", "") in self._EXPECTED_ORDER
+        ]
 
-        for mi, msg in enumerate(messages):
-            if msg.get("role") != "assistant":
-                continue
-            tool_calls = msg.get("tool_calls", [])
-            for tc in tool_calls:
-                func_name = tc.get("function", {}).get("name", "")
-                if func_name in self._EXPECTED_ORDER:
-                    call_history.append((mi, func_name))
-
-        if len(call_history) < 2:
-            logger.info(f"[{self.name}] 调用次数 {len(call_history)} < 2，跳过顺序检查")
+        if len(calls) < 2:
             return results
 
-        logger.info(
-            f"[{self.name}] 调用序列: "
-            + " → ".join(f"#{mi}:{name}" for mi, name in call_history)
-        )
+        logger.info(f"[{self.name}] 调用序列: {' → '.join(f'#{mi}:{n}' for mi, n in calls)}")
 
-        # 检查调用顺序
-        for i in range(1, len(call_history)):
-            prev_idx, prev_name = call_history[i - 1]
-            curr_idx, curr_name = call_history[i]
-            prev_order = self._EXPECTED_ORDER.get(prev_name, -1)
-            curr_order = self._EXPECTED_ORDER.get(curr_name, -1)
+        # 顺序检查
+        for i in range(1, len(calls)):
+            prev_mi, prev_name = calls[i - 1]
+            curr_mi, curr_name = calls[i]
+            if self._EXPECTED_ORDER[curr_name] < self._EXPECTED_ORDER[prev_name]:
+                results.append(EvalResult(
+                    message_index=curr_mi, dimension=self.name,
+                    finding=f"顺序错误: {prev_name} 后调用 {curr_name}",
+                    confidence=0.5,
+                    action=CleaningAction.KEEP,
+                    action_reason="顺序错误不自动修改，仅记录",
+                ))
 
-            if curr_order < prev_order:
-                logger.info(
-                    f"[{self.name}] 顺序错误: {prev_name}(#{prev_idx}) → {curr_name}(#{curr_idx})"
-                )
-                results.append(
-                    EvalResult(
-                        message_index=curr_idx,
-                        dimension=self.name,
-                        verdict="bad",
-                        reason=f"调用顺序不合理: {prev_name} 后不应调用 {curr_name}",
-                        severity=0.5,
-                    )
-                )
-
-        # 检查重复调用
+        # 重复检查
         seen: dict[str, int] = {}
-        for mi, name in call_history:
+        for mi, name in calls:
             if name in seen and name != "consistency_check":
-                logger.info(f"[{self.name}] 重复调用: {name} (首次 #{seen[name]}, 再次 #{mi})")
-                results.append(
-                    EvalResult(
-                        message_index=mi,
-                        dimension=self.name,
-                        verdict="bad",
-                        reason=f"重复调用 {name}（首次在消息 #{seen[name]}）",
-                        severity=0.4,
-                    )
-                )
+                results.append(EvalResult(
+                    message_index=mi, dimension=self.name,
+                    finding=f"重复调用 {name}（首次 #{seen[name]}）",
+                    confidence=0.4,
+                    action=CleaningAction.KEEP,
+                    action_reason="重复调用不自动删除，仅记录",
+                ))
             else:
                 seen[name] = mi
 
-        logger.info(f"[{self.name}] 产出 {len(results)} 条评估结果")
         return results

@@ -44,8 +44,9 @@ def write_report(
         for r in results:
             item_str = f" item#{r.item_index}" if r.item_index is not None else ""
             lines.append(
-                f"- 消息 #{r.message_index}{item_str}: **{r.verdict.upper()}** — "
-                f"{r.reason} (severity: {r.severity:.1f})"
+                f"- 消息 #{r.message_index}{item_str}: "
+                f"**{r.action.value.upper()}** (置信度: {r.confidence:.1f}) — "
+                f"{r.finding}"
             )
         lines.append("")
 
@@ -100,10 +101,11 @@ def write_report(
                 "message_index": r.message_index,
                 "item_index": r.item_index,
                 "dimension": r.dimension,
-                "verdict": r.verdict,
-                "reason": r.reason,
-                "severity": r.severity,
-                "suggested_fix": r.suggested_fix,
+                "finding": r.finding,
+                "confidence": r.confidence,
+                "action": r.action.value,
+                "action_reason": r.action_reason,
+                "new_content_preview": str(r.new_content)[:200] if r.new_content else None,
                 "debug_info": r.debug_info,
             }
             for r in eval_results

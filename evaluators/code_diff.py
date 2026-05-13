@@ -1,8 +1,10 @@
 """代码差异评估器 — predict vs reference 逐行 diff + LLM 语义判断。
 
-评估逻辑：
+逻辑：
+- 从 write/edit 工具的 arguments 中提取 agent 实际写出的代码（predict）
+- 与 reference.py 逐行 diff
 - 无差异 → KEEP
-- 有多余代码 → DELETE（有具体内容）
+- 有多余代码 → KEEP（记录供人工检查）
 - 有缺失代码 → REPLACE（用 reference 替换 predict）
 - LLM 判断功能等价 → KEEP
 """
@@ -10,6 +12,7 @@
 from __future__ import annotations
 
 import difflib
+import json
 import logging
 import re
 from typing import Any
@@ -19,6 +22,15 @@ from evaluators.base import BaseEvaluator
 from llm.client import LLMClient
 
 logger = logging.getLogger(__name__)
+
+# 写代码的工具 → arguments 中包含文件内容的 key
+_WRITE_TOOL_CONTENT_KEYS: dict[str, list[str]] = {
+    "write": ["content", "file_text", "text", "code"],
+    "edit": ["content", "new_content", "file_text", "text", "code"],
+    "create": ["content", "file_text", "text", "code"],
+    "create_file": ["content", "file_text", "text", "code"],
+    "write_file": ["content", "file_text", "text", "code"],
+}
 
 
 class CodeDiffEvaluator(BaseEvaluator):
@@ -33,23 +45,40 @@ class CodeDiffEvaluator(BaseEvaluator):
         reference: str,
         context: dict[str, Any],
     ) -> list[EvalResult]:
+        if not reference.strip():
+            return []
+
         results: list[EvalResult] = []
         total_blocks = 0
 
         for mi, msg in enumerate(messages):
             if msg.get("role") != "assistant":
                 continue
-            code_blocks = self._extract_code_blocks(msg)
-            for ii, code in enumerate(code_blocks):
+
+            # 1. 优先从 write/edit 工具调用中提取 predict code
+            for tc in msg.get("tool_calls", []):
+                fn = tc.get("function", {})
+                tool_name = fn.get("name", "")
+                if tool_name not in _WRITE_TOOL_CONTENT_KEYS:
+                    continue
+                code = self._extract_from_write_args(fn.get("arguments", ""), tool_name)
+                if not code:
+                    continue
                 total_blocks += 1
-                block_results = self._compare_block(mi, ii, code, reference)
-                results.extend(block_results)
+                results.extend(self._compare_block(mi, None, code, reference))
+
+            # 2. 如果没有 write 工具，回退到 content 中的代码块
+            #    （适用于 main trace 中 assistant 直接输出代码的场景）
+            if not msg.get("tool_calls"):
+                for ii, code in enumerate(self._extract_code_blocks(msg)):
+                    total_blocks += 1
+                    results.extend(self._compare_block(mi, ii, code, reference))
 
         logger.info(f"[{self.name}] 扫描 {total_blocks} 个代码块, 产出 {len(results)} 条结果")
         return results
 
     def _compare_block(
-        self, mi: int, ii: int, predict: str, reference: str
+        self, mi: int, ii: int | None, predict: str, reference: str
     ) -> list[EvalResult]:
         """对比一个代码块与 reference。"""
         predict_lines = predict.splitlines(keepends=True)
@@ -72,7 +101,7 @@ class CodeDiffEvaluator(BaseEvaluator):
         if removed:
             missing_code = "".join(removed)
             snippet = missing_code.strip()[:100]
-            logger.info(f"[{self.name}]   msg#{mi} item#{ii} 缺少: {snippet}...")
+            logger.info(f"[{self.name}]   msg#{mi} 缺少: {snippet}...")
 
             # LLM 判断是否功能等价
             if self.llm:
@@ -100,11 +129,11 @@ class CodeDiffEvaluator(BaseEvaluator):
                 )
             )
 
-        # 多余的代码 → 删除
+        # 多余的代码 → 记录但不自动删
         if added and not removed:
             extra_code = "".join(added)
             snippet = extra_code.strip()[:100]
-            logger.info(f"[{self.name}]   msg#{mi} item#{ii} 多余: {snippet}...")
+            logger.info(f"[{self.name}]   msg#{mi} 多余: {snippet}...")
 
             results.append(
                 EvalResult(
@@ -113,7 +142,7 @@ class CodeDiffEvaluator(BaseEvaluator):
                     dimension=self.name,
                     finding=f"多余的代码: {snippet}...",
                     confidence=min(1.0, len(added) * 0.15),
-                    action=CleaningAction.KEEP,  # 多余的代码不自动删，记录供人工检查
+                    action=CleaningAction.KEEP,
                     action_reason="多余的代码保留，供人工判断是否删除",
                     debug_info={
                         "predict_code_preview": predict[:500],
@@ -152,14 +181,30 @@ Predict:
     # ── 工具方法 ──────────────────────────────────────────────────────────
 
     @staticmethod
+    def _extract_from_write_args(arguments: str, tool_name: str) -> str:
+        """从 write/edit 工具的 arguments 中提取文件内容。"""
+        try:
+            args = json.loads(arguments) if isinstance(arguments, str) else arguments
+        except (json.JSONDecodeError, TypeError):
+            return ""
+        if not isinstance(args, dict):
+            return ""
+
+        keys = _WRITE_TOOL_CONTENT_KEYS.get(tool_name, [])
+        for key in keys:
+            val = args.get(key)
+            if isinstance(val, str) and val.strip():
+                return val
+        return ""
+
+    @staticmethod
     def _extract_code_blocks(msg: dict) -> list[str]:
+        """从 assistant content 中提取 ``` 代码块（回退方案）。"""
         blocks: list[str] = []
         content = msg.get("content", "")
         if isinstance(content, str):
             for m in re.finditer(r"```(?:\w*\n)?(.*?)```", content, re.DOTALL):
                 blocks.append(m.group(1).strip())
-            if not blocks and content.strip():
-                blocks.append(content.strip())
         elif isinstance(content, list):
             for item in content:
                 if isinstance(item, dict):

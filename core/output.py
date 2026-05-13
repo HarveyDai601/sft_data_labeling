@@ -50,13 +50,11 @@ def write_report(
             )
         lines.append("")
 
-    # 清洗操作
+    # 清洗操作（实际执行的动作）
     lines.append("## 清洗操作\n")
     action_count: dict[str, int] = {}
-    observations: list[CleaningPlan] = []
     for p in cleaning_plans:
-        if p.reason.startswith("[仅记录]"):
-            observations.append(p)
+        if p.action == CleaningAction.KEEP:
             continue
         action_count[p.action.value] = action_count.get(p.action.value, 0) + 1
         item_str = f" item#{p.item_index}" if p.item_index is not None else ""
@@ -68,14 +66,14 @@ def write_report(
         lines.append("（无实际清洗操作）")
     lines.append("")
 
-    # 仅记录的观察
+    # 观察记录（KEEP 的评估结果，来自 eval_results 而非 plans）
+    observations = [r for r in eval_results if r.action == CleaningAction.KEEP]
     if observations:
         lines.append("## 观察记录（未执行清洗）\n")
-        for p in observations:
-            item_str = f" item#{p.item_index}" if p.item_index is not None else ""
-            reason = p.reason.replace("[仅记录] ", "")
+        for r in observations:
+            item_str = f" item#{r.item_index}" if r.item_index is not None else ""
             lines.append(
-                f"- 消息 #{p.message_index}{item_str}: {reason} (来源: {p.source})"
+                f"- 消息 #{r.message_index}{item_str}: {r.finding} (来源: {r.dimension})"
             )
         lines.append("")
 

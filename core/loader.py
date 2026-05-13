@@ -10,7 +10,7 @@ from core.models import SubTrace, TaskData, trace_type_from_filename
 
 logger = logging.getLogger(__name__)
 
-_SUB_PREFIXES = ("script_retrieval_", "step_retrieval_", "script_completion_", "consistency_check_")
+_SUB_PREFIXES = ("script_retrieval_", "step_retrieval_", "script_complete_", "consistency_check_")
 
 
 def load_task(task_dir: Path) -> TaskData:

@@ -3,15 +3,15 @@ evaluators:
   code_diff:
     enabled: true
     weight: 1.0
-    applies_to: [script_completion]
+    applies_to: [script_complete]
   function_recall:
     enabled: true
     weight: 0.8
-    applies_to: [script_completion, main]
+    applies_to: [script_complete, main]
   param_recall:
     enabled: true
     weight: 0.7
-    applies_to: [script_completion, main]
+    applies_to: [script_complete, main]
   file_relevance:
     enabled: true
     weight: 0.9

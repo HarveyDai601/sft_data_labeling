@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 
 class Cleaner:
 
+    def __init__(self, conflict_resolution: str = "severity_priority"):
+        self.conflict_resolution = conflict_resolution
+
     def plan(
         self,
         messages: list[dict[str, Any]],

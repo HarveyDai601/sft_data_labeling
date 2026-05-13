@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -17,7 +18,7 @@ class ToolCallEvaluator(BaseEvaluator):
     _EXPECTED_ORDER = {
         "script_retrieval": 0,
         "step_retrieval": 1,
-        "script_completion": 2,
+        "script_complete": 2,
         "consistency_check": 3,
     }
 
@@ -28,13 +29,24 @@ class ToolCallEvaluator(BaseEvaluator):
         context: dict[str, Any],
     ) -> list[EvalResult]:
         results: list[EvalResult] = []
-        calls = [
-            (mi, tc.get("function", {}).get("name", ""))
-            for mi, msg in enumerate(messages)
-            if msg.get("role") == "assistant"
-            for tc in msg.get("tool_calls", [])
-            if tc.get("function", {}).get("name", "") in self._EXPECTED_ORDER
-        ]
+
+        # 提取 sub-agent 调用序列
+        # main trace: function.name == "task", arguments.subagent_type 指定类型
+        calls: list[tuple[int, str]] = []
+        for mi, msg in enumerate(messages):
+            if msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls", []):
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
+
+                subagent_type = None
+                if name == "task":
+                    subagent_type = self._get_subagent_type(fn.get("arguments", ""))
+                    if subagent_type and subagent_type in self._EXPECTED_ORDER:
+                        calls.append((mi, subagent_type))
+                elif name in self._EXPECTED_ORDER:
+                    calls.append((mi, name))
 
         if len(calls) < 2:
             return results
@@ -69,3 +81,13 @@ class ToolCallEvaluator(BaseEvaluator):
                 seen[name] = mi
 
         return results
+
+    @staticmethod
+    def _get_subagent_type(arguments: str) -> str | None:
+        try:
+            args = json.loads(arguments) if isinstance(arguments, str) else arguments
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if isinstance(args, dict):
+            return args.get("subagent_type") or args.get("sub_agent_type")
+        return None

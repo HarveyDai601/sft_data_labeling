@@ -14,7 +14,6 @@ from __future__ import annotations
 import difflib
 import json
 import logging
-import re
 from typing import Any
 
 from core.models import CleaningAction, EvalResult
@@ -67,12 +66,6 @@ class CodeDiffEvaluator(BaseEvaluator):
                 total_blocks += 1
                 results.extend(self._compare_block(mi, None, code, reference))
 
-            # 2. 如果没有 write 工具，回退到 content 中的代码块
-            #    （适用于 main trace 中 assistant 直接输出代码的场景）
-            if not msg.get("tool_calls"):
-                for ii, code in enumerate(self._extract_code_blocks(msg)):
-                    total_blocks += 1
-                    results.extend(self._compare_block(mi, ii, code, reference))
 
         logger.info(f"[{self.name}] 扫描 {total_blocks} 个代码块, 产出 {len(results)} 条结果")
         return results
@@ -197,21 +190,3 @@ Predict:
                 return val
         return ""
 
-    @staticmethod
-    def _extract_code_blocks(msg: dict) -> list[str]:
-        """从 assistant content 中提取 ``` 代码块（回退方案）。"""
-        blocks: list[str] = []
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            for m in re.finditer(r"```(?:\w*\n)?(.*?)```", content, re.DOTALL):
-                blocks.append(m.group(1).strip())
-        elif isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict):
-                    if item.get("type") == "code":
-                        blocks.append(item.get("text", "") or item.get("content", ""))
-                    elif item.get("type") == "text":
-                        text = item.get("text", "")
-                        for m in re.finditer(r"```(?:\w*\n)?(.*?)```", text, re.DOTALL):
-                            blocks.append(m.group(1).strip())
-        return blocks

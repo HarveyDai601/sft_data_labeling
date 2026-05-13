@@ -119,7 +119,10 @@ def process_task(
     )
 
     task_output = output_dir / task.task_id
-    task_output.mkdir(parents=True, exist_ok=True)
+    cleaned_dir = task_output / "cleaned"
+    reports_dir = task_output / "reports"
+    cleaned_dir.mkdir(parents=True, exist_ok=True)
+    reports_dir.mkdir(parents=True, exist_ok=True)
 
     traces_info: dict[str, dict[str, Any]] = {}
 
@@ -135,8 +138,8 @@ def process_task(
         cleaner,
         dep_resolver,
     )
-    write_cleaned_json(task_output / "main_cleaned.json", cleaned_main)
-    write_report(task_output / "main_report.md", "main", evals, plans, len(task.main_messages))
+    write_cleaned_json(cleaned_dir / "main.json", cleaned_main)
+    write_report(reports_dir / "main.md", "main", evals, plans, len(task.main_messages))
     traces_info["main"] = {
         "total_messages": len(task.main_messages),
         "total_evals": len(evals),
@@ -156,8 +159,8 @@ def process_task(
             cleaner,
             dep_resolver,
         )
-        write_cleaned_json(task_output / f"{sub.name}_cleaned.json", cleaned_sub)
-        write_report(task_output / f"{sub.name}_report.md", sub.name, evals, plans, len(sub.messages))
+        write_cleaned_json(cleaned_dir / f"{sub.name}.json", cleaned_sub)
+        write_report(reports_dir / f"{sub.name}.md", sub.name, evals, plans, len(sub.messages))
         traces_info[sub.name] = {
             "total_messages": len(sub.messages),
             "total_evals": len(evals),

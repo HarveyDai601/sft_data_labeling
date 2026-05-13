@@ -101,10 +101,10 @@ def diagnose_trace(
         # 检查是否适用于此 trace type
         # (这里硬编码，和 config.yaml 一致)
         _applies = {
-            "code_diff": ["code_completion"],
-            "function_recall": ["code_completion", "main"],
-            "param_recall": ["code_completion", "main"],
-            "file_relevance": ["file_retrieval"],
+            "code_diff": ["script_completion"],
+            "function_recall": ["script_completion", "main"],
+            "param_recall": ["script_completion", "main"],
+            "file_relevance": ["script_retrieval"],
             "step_relevance": ["step_retrieval"],
             "consistency": ["consistency_check"],
             "tool_call_decision": ["main"],
@@ -157,7 +157,7 @@ def diagnose_trace(
                     continue
                 for tc in msg.get("tool_calls", []):
                     fn = tc.get("function", {}).get("name", "")
-                    if fn in ("file_retrieval", "step_retrieval", "code_completion", "consistency_check"):
+                    if fn in ("script_retrieval", "step_retrieval", "script_completion", "consistency_check"):
                         calls.append((i, fn))
             print(f"    tool calls: {calls}")
             if len(calls) < 2:

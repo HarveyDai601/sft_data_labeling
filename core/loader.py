@@ -10,7 +10,7 @@ from core.models import SubTrace, TaskData, trace_type_from_filename
 
 logger = logging.getLogger(__name__)
 
-_SUB_PREFIXES = ("file_retrieval_", "step_retrieval_", "code_completion_", "consistency_check_")
+_SUB_PREFIXES = ("script_retrieval_", "step_retrieval_", "script_completion_", "consistency_check_")
 
 
 def load_task(task_dir: Path) -> TaskData:
@@ -38,7 +38,7 @@ def load_task(task_dir: Path) -> TaskData:
     for f in sorted(task_dir.iterdir()):
         if not f.name.endswith(".json") or f.name == "main.json":
             continue
-        stem = f.stem  # e.g. "file_retrieval_0"
+        stem = f.stem  # e.g. "script_retrieval_0"
         if not any(stem.startswith(p) for p in _SUB_PREFIXES):
             continue
         trace_type, idx = trace_type_from_filename(stem)

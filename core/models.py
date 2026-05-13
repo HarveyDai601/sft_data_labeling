@@ -65,8 +65,8 @@ class CleaningPlan:
 class SubTrace:
     """一个 sub agent 的 trace。"""
 
-    name: str                           # e.g. "file_retrieval_0"
-    trace_type: str                     # "file_retrieval" | "step_retrieval" | "code_completion" | "consistency_check"
+    name: str                           # e.g. "script_retrieval_0"
+    trace_type: str                     # "script_retrieval" | "step_retrieval" | "script_completion" | "consistency_check"
     index: int                          # 同类型第几次调用 (0‑based)
     messages: list[dict[str, Any]] = field(default_factory=list)
 
@@ -87,8 +87,8 @@ class TaskData:
 
 
 def trace_type_from_filename(filename: str) -> tuple[str, int]:
-    """从文件名解析 trace 类型和索引，如 'file_retrieval_0' → ('file_retrieval', 0)。"""
-    for prefix in ("file_retrieval", "step_retrieval", "code_completion", "consistency_check"):
+    """从文件名解析 trace 类型和索引，如 'script_retrieval_0' → ('script_retrieval', 0)。"""
+    for prefix in ("script_retrieval", "step_retrieval", "script_completion", "consistency_check"):
         if filename.startswith(prefix):
             idx = int(filename[len(prefix) + 1 :])
             return prefix, idx

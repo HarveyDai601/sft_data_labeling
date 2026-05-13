@@ -8,9 +8,9 @@
 
 data/task_001/
 ├── main.json        ──┐
-├── file_retrieval_0.json │         ┌──────────────┐
+├── script_retrieval_0.json │         ┌──────────────┐
 ├── step_retrieval_0.json │         │   Loader     │
-├── code_completion_0.json│    ──→  │ 加载所有文件  │  ──→  TaskData
+├── script_completion_0.json│    ──→  │ 加载所有文件  │  ──→  TaskData
 ├── consistency_check_0.json        │ 建立对应关系  │
 ├── reference.py     ──┘           └──────┬───────┘
                                               │
@@ -228,9 +228,9 @@ DELETE 时：有 tool_calls/tool_call_id 的 message → 只清空 content，保
 ```
 output/task_001/
 ├── main_cleaned.json              ← 清洗后的 SFT 数据（OpenAI messages 格式）
-├── file_retrieval_0_cleaned.json  ← 每个 sub agent 独立输出
+├── script_retrieval_0_cleaned.json  ← 每个 sub agent 独立输出
 ├── step_retrieval_0_cleaned.json
-├── code_completion_0_cleaned.json
+├── script_completion_0_cleaned.json
 ├── consistency_check_0_cleaned.json
 ├── main_report.md                 ← 处理报告（为什么这么处理）
 ├── ...
@@ -255,10 +255,10 @@ output/task_001/
 ```yaml
 # 哪些评估器对哪种 trace 生效
 evaluators:
-  code_diff:        { applies_to: [code_completion] }
-  function_recall:  { applies_to: [code_completion, main] }
-  param_recall:     { applies_to: [code_completion, main] }
-  file_relevance:   { applies_to: [file_retrieval] }
+  code_diff:        { applies_to: [script_completion] }
+  function_recall:  { applies_to: [script_completion, main] }
+  param_recall:     { applies_to: [script_completion, main] }
+  file_relevance:   { applies_to: [script_retrieval] }
   step_relevance:   { applies_to: [step_retrieval] }
   consistency:      { applies_to: [consistency_check] }
   tool_call_decision: { applies_to: [main] }

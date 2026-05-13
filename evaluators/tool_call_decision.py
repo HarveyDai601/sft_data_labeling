@@ -15,9 +15,9 @@ class ToolCallEvaluator(BaseEvaluator):
     name = "tool_call_decision"
 
     _EXPECTED_ORDER = {
-        "file_retrieval": 0,
+        "script_retrieval": 0,
         "step_retrieval": 1,
-        "code_completion": 2,
+        "script_completion": 2,
         "consistency_check": 3,
     }
 

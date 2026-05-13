@@ -6,10 +6,10 @@
 data/
 ├── task_001/
 │   ├── main.json                    # Main agent trace
-│   ├── file_retrieval_0.json        # Sub agent trace (type 1)
-│   ├── file_retrieval_1.json        # Sub agent trace (type 1)
+│   ├── script_retrieval_0.json        # Sub agent trace (type 1)
+│   ├── script_retrieval_1.json        # Sub agent trace (type 1)
 │   ├── step_retrieval_0.json        # Sub agent trace (type 2)
-│   ├── code_completion_0.json       # Sub agent trace (type 3)
+│   ├── script_completion_0.json       # Sub agent trace (type 3)
 │   ├── consistency_check_0.json     # Sub agent trace (type 4)
 │   ├── reference.py                 # 参考代码
 │   └── context.md                   # （可选）上下文信息
@@ -38,7 +38,7 @@ data/
           "id": "call_001",
           "type": "function",
           "function": {
-            "name": "file_retrieval",
+            "name": "script_retrieval",
             "arguments": "{\"file_path\": \"math.py\"}"
           }
         }
@@ -47,7 +47,7 @@ data/
     {
       "role": "tool",
       "tool_call_id": "call_001",
-      "name": "file_retrieval",
+      "name": "script_retrieval",
       "content": "def factorial(n):\n    return n * factorial(n-1)"
     },
     {
@@ -75,7 +75,7 @@ data/
   "id": "call_abc123",           // 唯一 ID，用来关联 tool 消息
   "type": "function",
   "function": {
-    "name": "file_retrieval",    // 工具类型：file_retrieval, step_retrieval, 等
+    "name": "script_retrieval",    // 工具类型：script_retrieval, step_retrieval, 等
     "arguments": "{...}"         // JSON 字符串格式的参数
   }
 }
@@ -87,7 +87,7 @@ data/
 {
   "role": "tool",
   "tool_call_id": "call_abc123",     // 必须匹配对应的 tool_call.id
-  "name": "file_retrieval",          // 工具类型
+  "name": "script_retrieval",          // 工具类型
   "content": "file contents..."       // 工具的返回结果
 }
 ```
@@ -96,9 +96,9 @@ data/
 
 | 类型 | 文件名前缀 | 说明 |
 |------|----------|------|
-| File Retrieval | `file_retrieval_*.json` | 检索相关文件 |
+| File Retrieval | `script_retrieval_*.json` | 检索相关文件 |
 | Step Retrieval | `step_retrieval_*.json` | 检索解题步骤 |
-| Code Completion | `code_completion_*.json` | 代码补全 |
+| Code Completion | `script_completion_*.json` | 代码补全 |
 | Consistency Check | `consistency_check_*.json` | 一致性检查 |
 
 ## 7. 完整示例
@@ -120,7 +120,7 @@ data/
           "id": "call_1",
           "type": "function",
           "function": {
-            "name": "file_retrieval",
+            "name": "script_retrieval",
             "arguments": "{\"file_path\": \"fibonacci.py\"}"
           }
         }
@@ -129,7 +129,7 @@ data/
     {
       "role": "tool",
       "tool_call_id": "call_1",
-      "name": "file_retrieval",
+      "name": "script_retrieval",
       "content": "def fib(n):\n    if n <= 1:\n        return n\n    return fib(n-1) + fib(n-2)"
     },
     {
@@ -164,7 +164,7 @@ data/
 }
 ```
 
-### Sub trace - file_retrieval（file_retrieval_0.json）
+### Sub trace - script_retrieval（script_retrieval_0.json）
 
 ```json
 {
@@ -181,7 +181,7 @@ data/
           "id": "call_1",
           "type": "function",
           "function": {
-            "name": "file_retrieval",
+            "name": "script_retrieval",
             "arguments": "{\"file_path\": \"fibonacci.py\"}"
           }
         }
@@ -190,7 +190,7 @@ data/
     {
       "role": "tool",
       "tool_call_id": "call_1",
-      "name": "file_retrieval",
+      "name": "script_retrieval",
       "content": "def fib(n):\n    if n <= 1:\n        return n\n    return fib(n-1) + fib(n-2)"
     },
     {

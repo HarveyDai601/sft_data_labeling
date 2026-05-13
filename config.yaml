@@ -3,19 +3,19 @@ evaluators:
   code_diff:
     enabled: true
     weight: 1.0
-    applies_to: [code_completion]
+    applies_to: [script_completion]
   function_recall:
     enabled: true
     weight: 0.8
-    applies_to: [code_completion, main]
+    applies_to: [script_completion, main]
   param_recall:
     enabled: true
     weight: 0.7
-    applies_to: [code_completion, main]
+    applies_to: [script_completion, main]
   file_relevance:
     enabled: true
     weight: 0.9
-    applies_to: [file_retrieval]
+    applies_to: [script_retrieval]
   step_relevance:
     enabled: true
     weight: 0.9

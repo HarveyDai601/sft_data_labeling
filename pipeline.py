@@ -53,7 +53,7 @@ def build_evaluators(
             continue
 
         # 部分评估器需要 LLM 客户端
-        if name in ("code_diff", "consistency"):
+        if name in ("code_diff", "consistency", "function_recall", "param_recall"):
             evaluators.append(cls(llm=llm))
         else:
             evaluators.append(cls())

@@ -160,18 +160,25 @@ class Cleaner:
     ) -> dict[str, Any] | None:
         """对单条 message 应用 item 级别的清洗计划。"""
         content = msg.get("content", "")
+        has_tool_calls = bool(msg.get("tool_calls"))
+        has_tool_call_id = bool(msg.get("tool_call_id"))  # tool response
 
-        # 如果 content 是字符串，且有 DELETE → 返回 None
+        # ── string content ────────────────────────────────────────────────
         if isinstance(content, str):
             if any(p.action == CleaningAction.DELETE for p in plans):
+                # 有 tool_calls 的 assistant message 或 tool response → 只清空 content，保留结构
+                if has_tool_calls or has_tool_call_id:
+                    new_msg = dict(msg)
+                    new_msg["content"] = ""
+                    return new_msg
                 return None
             if any(p.action == CleaningAction.REPLACE for p in plans):
-                msg = dict(msg)
-                msg["content"] = plans[0].new_content or content
-                return msg
+                new_msg = dict(msg)
+                new_msg["content"] = plans[0].new_content or content
+                return new_msg
             return msg
 
-        # content 是列表
+        # ── list content ──────────────────────────────────────────────────
         if not isinstance(content, list):
             return msg
 
@@ -205,6 +212,12 @@ class Cleaner:
             else:
                 new_content.append(item)
 
-        msg = dict(msg)
-        msg["content"] = new_content
-        return msg if new_content else None
+        # 如果 content 被清空，但有 tool_calls → 保留 message 结构
+        if not new_content and (has_tool_calls or has_tool_call_id):
+            new_msg = dict(msg)
+            new_msg["content"] = ""
+            return new_msg
+
+        new_msg = dict(msg)
+        new_msg["content"] = new_content
+        return new_msg if new_content else None

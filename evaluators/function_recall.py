@@ -38,11 +38,13 @@ class FunctionRecallEvaluator(BaseEvaluator):
         # ── Step 1: AST 提取期望 API ─────────────────────────────────────
         required_apis = self._extract_apis_from_code(reference)
         if not required_apis:
+            logger.info(f"[{self.name}] reference 中未提取到 API，跳过")
             return []
 
         is_main = context.get("trace_type") == "main"
         target_indices = self._get_target_indices(messages, is_main)
         if not target_indices:
+            logger.info(f"[{self.name}] 无目标 assistant message，跳过")
             return []
 
         # ── Step 2: AST 提取 trace 实际 API ───────────────────────────────
@@ -54,24 +56,39 @@ class FunctionRecallEvaluator(BaseEvaluator):
         for code in trace_code_blocks:
             trace_apis.update(self._extract_apis_from_code(code))
 
+        logger.info(
+            f"[{self.name}] reference API: {sorted(required_apis)} | "
+            f"trace API: {sorted(trace_apis)}"
+        )
+
         # ── Step 3: 差集 = 疑点 ───────────────────────────────────────────
         suspects = required_apis - trace_apis
         if not suspects:
+            logger.info(f"[{self.name}] 所有 API 均已出现，无缺失")
             return []
+
+        logger.info(f"[{self.name}] 疑点（AST 差集）: {sorted(suspects)}")
 
         # ── Step 4: LLM 终判 ─────────────────────────────────────────────
         if self.llm:
             confirmed, rejected = self._llm_verify(
                 reference, "\n".join(trace_code_blocks), suspects
             )
+            if rejected:
+                logger.info(f"[{self.name}] LLM 过滤掉的误报: {sorted(rejected)}")
             if not confirmed:
+                logger.info(f"[{self.name}] LLM 判断全部为等价实现，无真正缺失")
                 return []
-            # LLM 过滤后只剩真正的缺失
             suspects = confirmed
+            logger.info(f"[{self.name}] LLM 确认真正缺失: {sorted(suspects)}")
         else:
             # 无 LLM，用启发式过滤：只保留 reference 中的顶层函数定义
             ref_defs = self._extract_top_level_defs(reference)
+            before = suspects.copy()
             suspects = suspects & ref_defs
+            filtered = before - suspects
+            if filtered:
+                logger.info(f"[{self.name}] 无 LLM，启发式过滤掉非顶层定义: {sorted(filtered)}")
 
         if not suspects:
             return []
@@ -79,6 +96,11 @@ class FunctionRecallEvaluator(BaseEvaluator):
         # ── 生成结果 ─────────────────────────────────────────────────────
         missing_ratio = len(suspects) / len(required_apis)
         severity = min(1.0, missing_ratio * 1.5)
+
+        logger.info(
+            f"[{self.name}] 最终结果: 缺失 {sorted(suspects)}, "
+            f"missing_ratio={missing_ratio:.2f}, severity={severity:.2f}"
+        )
 
         return [
             EvalResult(
@@ -99,11 +121,6 @@ class FunctionRecallEvaluator(BaseEvaluator):
         trace_code: str,
         suspects: set[str],
     ) -> tuple[set[str], set[str]]:
-        """LLM 判断疑点中哪些是真正缺失，哪些有等价实现。
-
-        Returns:
-            (confirmed_missing, rejected_false_positives)
-        """
         suspects_list = ", ".join(sorted(suspects))
         prompt = f"""你是一个代码审查专家。以下是 reference 代码和 agent 实际产出的代码。
 
@@ -140,11 +157,10 @@ AST 分析发现以下函数/API 在 agent 代码中未出现:
             rejected = set(resp.get("rejected", []))
             reasons = resp.get("reasons", {})
             for api, reason in reasons.items():
-                logger.info(f"  LLM 判断 {api}: {reason}")
+                logger.info(f"[{self.name}] LLM 判断 {api}: {reason}")
             return confirmed, rejected
         except Exception as e:
-            logger.warning(f"LLM 验证失败，退化为 AST 规则: {e}")
-            # fallback: 只保留顶层定义
+            logger.warning(f"[{self.name}] LLM 验证失败，退化为 AST 规则: {e}")
             ref_defs = self._extract_top_level_defs(reference)
             return suspects & ref_defs, set()
 
@@ -152,7 +168,6 @@ AST 分析发现以下函数/API 在 agent 代码中未出现:
 
     @staticmethod
     def _extract_apis_from_code(code: str) -> set[str]:
-        """从代码中提取所有函数定义名 + 非内置的函数调用名。"""
         apis: set[str] = set()
         try:
             tree = ast.parse(code)
@@ -170,7 +185,6 @@ AST 分析发现以下函数/API 在 agent 代码中未出现:
 
     @staticmethod
     def _extract_top_level_defs(code: str) -> set[str]:
-        """只提取顶层函数定义（非嵌套）。"""
         defs: set[str] = set()
         try:
             tree = ast.parse(code)

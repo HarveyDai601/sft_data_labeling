@@ -40,11 +40,13 @@ class ParamRecallEvaluator(BaseEvaluator):
         # ── Step 1: AST 提取 reference 函数签名 ───────────────────────────
         ref_sigs = self._extract_func_signatures(reference)
         if not ref_sigs:
+            logger.info(f"[{self.name}] reference 中未提取到函数签名，跳过")
             return []
 
         is_main = context.get("trace_type") == "main"
         target_indices = self._get_target_indices(messages, is_main)
         if not target_indices:
+            logger.info(f"[{self.name}] 无目标 assistant message，跳过")
             return []
 
         # ── Step 2: AST 提取 trace 函数签名 ───────────────────────────────
@@ -55,11 +57,16 @@ class ParamRecallEvaluator(BaseEvaluator):
         )
         trace_sigs = self._extract_func_signatures(trace_code)
 
+        logger.info(
+            f"[{self.name}] reference 签名: { {k: sorted(v) for k, v in ref_sigs.items()} } | "
+            f"trace 签名: { {k: sorted(v) for k, v in trace_sigs.items()} }"
+        )
+
         # ── Step 3: 按函数配对，找参数差异 ────────────────────────────────
         suspects: list[dict[str, Any]] = []
         for func_name, ref_params in ref_sigs.items():
             if func_name not in trace_sigs:
-                # 函数本身缺失 → 由 function_recall 处理，这里跳过
+                logger.info(f"[{self.name}] 函数 {func_name} 在 trace 中未定义（由 function_recall 处理）")
                 continue
             trace_params = trace_sigs[func_name]
             missing_params = ref_params - trace_params
@@ -72,12 +79,23 @@ class ParamRecallEvaluator(BaseEvaluator):
                 })
 
         if not suspects:
+            logger.info(f"[{self.name}] 所有函数参数匹配，无差异")
             return []
+
+        logger.info(
+            f"[{self.name}] 疑点（AST 差集）: "
+            + "; ".join(f"{s['function']} 缺失 {s['missing']}" for s in suspects)
+        )
 
         # ── Step 4: LLM 终判 ─────────────────────────────────────────────
         if self.llm:
+            before_count = sum(len(s["missing"]) for s in suspects)
             suspects = self._llm_verify(trace_code, suspects)
+            after_count = sum(len(s["missing"]) for s in suspects) if suspects else 0
+            if before_count > after_count:
+                logger.info(f"[{self.name}] LLM 过滤掉 {before_count - after_count} 个语义等价的参数")
             if not suspects:
+                logger.info(f"[{self.name}] LLM 判断全部为语义等价，无真正缺失")
                 return []
 
         # ── 生成结果 ─────────────────────────────────────────────────────
@@ -90,6 +108,11 @@ class ParamRecallEvaluator(BaseEvaluator):
         details = "; ".join(
             f"{s['function']}({', '.join(s['missing'])})"
             for s in suspects
+        )
+
+        logger.info(
+            f"[{self.name}] 最终结果: {details}, "
+            f"missing_ratio={missing_ratio:.2f}, severity={severity:.2f}"
         )
 
         return [
@@ -110,7 +133,6 @@ class ParamRecallEvaluator(BaseEvaluator):
         trace_code: str,
         suspects: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """LLM 判断参数名不同是否语义等价。"""
         suspect_desc = "\n".join(
             f"- {s['function']}: reference 参数 {s['ref_params']}, "
             f"trace 参数 {s['trace_params']}, 缺失 {s['missing']}"
@@ -145,8 +167,10 @@ Agent 代码:
             confirmed: list[dict[str, Any]] = []
             for r in resp.get("results", []):
                 real_missing = set(r.get("real_missing", []))
+                equiv = r.get("equivalent", [])
+                if equiv:
+                    logger.info(f"[{self.name}] LLM 判断 {r['function']} 中 {equiv} 为语义等价")
                 if real_missing:
-                    # 找到对应的 suspect 并更新
                     for s in suspects:
                         if s["function"] == r["function"]:
                             confirmed.append({
@@ -157,14 +181,13 @@ Agent 代码:
                             })
             return confirmed
         except Exception as e:
-            logger.warning(f"LLM 验证失败，退化为 AST 规则: {e}")
+            logger.warning(f"[{self.name}] LLM 验证失败，退化为 AST 规则: {e}")
             return suspects
 
     # ── AST 解析 ──────────────────────────────────────────────────────────
 
     @staticmethod
     def _extract_func_signatures(code: str) -> dict[str, set[str]]:
-        """提取所有函数定义的 {函数名: 参数名集合}。"""
         sigs: dict[str, set[str]] = {}
         try:
             tree = ast.parse(code)
@@ -189,7 +212,6 @@ Agent 代码:
 
     @staticmethod
     def _extract_func_signatures_regex(code: str) -> dict[str, set[str]]:
-        """fallback：正则提取。"""
         code = re.sub(r'"""[\s\S]*?"""', '', code)
         code = re.sub(r"'''[\s\S]*?'''", '', code)
         code = re.sub(r'#.*$', '', code, flags=re.MULTILINE)

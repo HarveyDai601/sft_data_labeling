@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
 from core.models import EvalResult
 from evaluators.base import BaseEvaluator
+
+logger = logging.getLogger(__name__)
 
 
 class FileRelevanceEvaluator(BaseEvaluator):
@@ -20,6 +23,7 @@ class FileRelevanceEvaluator(BaseEvaluator):
     ) -> list[EvalResult]:
         ref_files = self._extract_imported_files(reference)
         if not ref_files:
+            logger.info(f"[{self.name}] reference 中未提取到 import 文件，跳过")
             return []
 
         results: list[EvalResult] = []
@@ -35,7 +39,13 @@ class FileRelevanceEvaluator(BaseEvaluator):
             irrelevant = retrieved_files - ref_files
             missing = ref_files - retrieved_files
 
+            logger.info(
+                f"[{self.name}] msg#{mi}: 检索 {len(retrieved_files)} 个文件, "
+                f"相关 {len(relevant)}, 不相关 {len(irrelevant)}, 缺失 {len(missing)}"
+            )
+
             if irrelevant:
+                logger.info(f"[{self.name}]   不相关: {sorted(irrelevant)}")
                 results.append(
                     EvalResult(
                         message_index=mi,
@@ -46,6 +56,7 @@ class FileRelevanceEvaluator(BaseEvaluator):
                     )
                 )
             if missing:
+                logger.info(f"[{self.name}]   缺失: {sorted(missing)}")
                 results.append(
                     EvalResult(
                         message_index=mi,
@@ -57,29 +68,25 @@ class FileRelevanceEvaluator(BaseEvaluator):
                     )
                 )
 
+        logger.info(f"[{self.name}] 产出 {len(results)} 条评估结果")
         return results
 
     # ── 内部方法 ──────────────────────────────────────────────────────────
 
     @staticmethod
     def _extract_imported_files(code: str) -> set[str]:
-        """从 Python 代码中提取 import 的模块/文件。"""
         files: set[str] = set()
-        # import xxx / from xxx import yyy
         for m in re.finditer(r"(?:from|import)\s+([\w.]+)", code):
             mod = m.group(1)
-            # 转换模块路径到文件路径
             files.add(mod.replace(".", "/") + ".py")
             files.add(mod)
         return files
 
     @staticmethod
     def _extract_retrieved_files(msg: dict[str, Any]) -> set[str]:
-        """从 tool response 中提取检索到的文件路径。"""
         files: set[str] = set()
         content = msg.get("content", "")
         if isinstance(content, str):
-            # 尝试匹配文件路径
             for m in re.finditer(r"[\w/\\]+\.\w+", content):
                 files.add(m.group())
         elif isinstance(content, list):

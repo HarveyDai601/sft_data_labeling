@@ -2,21 +2,23 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from core.models import EvalResult
 from evaluators.base import BaseEvaluator
 
+logger = logging.getLogger(__name__)
+
 
 class ToolCallEvaluator(BaseEvaluator):
     name = "tool_call_decision"
 
-    # 合理的调用顺序约束
     _EXPECTED_ORDER = {
-        "file_retrieval": 0,    # 先检索文件
-        "step_retrieval": 1,    # 再检索步骤
-        "code_completion": 2,   # 然后补全代码
-        "consistency_check": 3, # 最后一致性检查
+        "file_retrieval": 0,
+        "step_retrieval": 1,
+        "code_completion": 2,
+        "consistency_check": 3,
     }
 
     def evaluate(
@@ -26,7 +28,7 @@ class ToolCallEvaluator(BaseEvaluator):
         context: dict[str, Any],
     ) -> list[EvalResult]:
         results: list[EvalResult] = []
-        call_history: list[tuple[int, str]] = []  # (message_index, tool_name)
+        call_history: list[tuple[int, str]] = []
 
         for mi, msg in enumerate(messages):
             if msg.get("role") != "assistant":
@@ -38,7 +40,13 @@ class ToolCallEvaluator(BaseEvaluator):
                     call_history.append((mi, func_name))
 
         if len(call_history) < 2:
+            logger.info(f"[{self.name}] 调用次数 {len(call_history)} < 2，跳过顺序检查")
             return results
+
+        logger.info(
+            f"[{self.name}] 调用序列: "
+            + " → ".join(f"#{mi}:{name}" for mi, name in call_history)
+        )
 
         # 检查调用顺序
         for i in range(1, len(call_history)):
@@ -48,6 +56,9 @@ class ToolCallEvaluator(BaseEvaluator):
             curr_order = self._EXPECTED_ORDER.get(curr_name, -1)
 
             if curr_order < prev_order:
+                logger.info(
+                    f"[{self.name}] 顺序错误: {prev_name}(#{prev_idx}) → {curr_name}(#{curr_idx})"
+                )
                 results.append(
                     EvalResult(
                         message_index=curr_idx,
@@ -58,11 +69,11 @@ class ToolCallEvaluator(BaseEvaluator):
                     )
                 )
 
-        # 检查是否有重复调用
+        # 检查重复调用
         seen: dict[str, int] = {}
         for mi, name in call_history:
             if name in seen and name != "consistency_check":
-                # 重复调用（consistency_check 可以多次）
+                logger.info(f"[{self.name}] 重复调用: {name} (首次 #{seen[name]}, 再次 #{mi})")
                 results.append(
                     EvalResult(
                         message_index=mi,
@@ -75,4 +86,5 @@ class ToolCallEvaluator(BaseEvaluator):
             else:
                 seen[name] = mi
 
+        logger.info(f"[{self.name}] 产出 {len(results)} 条评估结果")
         return results

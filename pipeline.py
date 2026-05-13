@@ -19,7 +19,7 @@ from evaluators import REGISTRY as EVALUATOR_REGISTRY
 from evaluators.base import BaseEvaluator
 from llm.client import LLMClient
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(name)s | %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -180,7 +180,11 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=Path("config.yaml"), help="配置文件")
     parser.add_argument("--task", type=str, default=None, help="只处理指定 task")
     parser.add_argument("--eval_only", action="store_true", help="只评估不清洗")
+    parser.add_argument("--verbose", "-v", action="store_true", help="显示详细评估日志")
     args = parser.parse_args()
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
 
     config = load_config(args.config)
 

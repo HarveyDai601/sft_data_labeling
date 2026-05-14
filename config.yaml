@@ -25,7 +25,7 @@ cleaner:
 
 # LLM 配置 — 兼容任何 OpenAI 兼容 API（公司内网、vLLM、Ollama 等）
 llm:
-  base_url: "http://localhost:8000/v1"
+  base_url: "http://10.123.160.137:30000/v1"
   api_key: "dummy-key"
   model: "Deepseek-V4-Flash"
   temperature: 0.1

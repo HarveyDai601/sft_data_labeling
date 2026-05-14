@@ -7,11 +7,11 @@ evaluators:
   info_usage:
     enabled: true
     weight: 0.9
-    applies_to: [script_retrieval, script_complete]
+    applies_to: [script_complete]
   orchestration:
     enabled: true
     weight: 1.0
-    applies_to: [main, script_retrieval, step_retrieval, script_complete]
+    applies_to: [main]
   consistency:
     enabled: true
     weight: 0.8
